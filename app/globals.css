@@ -1,0 +1,80 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* The prototype's palette, verbatim. Light is the default; dark swaps only the
+   variables it needs to. Nothing in the app hardcodes a hex except the two
+   places that are deliberately outside the theme: the WhatsApp mock and the
+   customer's own page, which must look the same on the customer's phone
+   whatever the operator's theme is. */
+:root {
+  --ground: #F4F6F9;
+  --surface: #FFFFFF;
+  --surface2: #F7F9FC;
+  --navy: #10203D;
+  --navy2: #1A2E52;
+  --accent: #F2B705;
+  --ink: #111826;
+  --muted: #5A6478;
+  --line: #D9E0EA;
+  --good: #0E7C56;
+  --warn: #C2410C;
+  --crit: #B3261E;
+  --critsoft: #FBECEA;
+  --warnsoft: #FDF4EA;
+  --goodsoft: #EAF5F0;
+  --retbg: #F6E7E5;
+  --hover: #F1F4F9;
+  --navmuted: #A8B6CE;
+  --rowpad: 11px 12px;
+  color-scheme: light;
+}
+
+[data-theme='dark'] {
+  --ground: #0C1220;
+  --surface: #141C2C;
+  --surface2: #1A2335;
+  --ink: #E9EEF6;
+  --muted: #8D98AD;
+  --line: #25324B;
+  --good: #34B183;
+  --warn: #E8763A;
+  --crit: #EF5B50;
+  --critsoft: #2A1614;
+  --warnsoft: #271A10;
+  --goodsoft: #12291F;
+  --retbg: #26130F;
+  --hover: #1C2638;
+  --navy2: #24365C;
+  color-scheme: dark;
+}
+
+html, body { margin: 0; padding: 0; overflow-x: hidden; }
+body {
+  background: var(--ground);
+  color: var(--ink);
+  min-height: 100vh;
+  font-family: 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+a { color: var(--navy); text-decoration: none; }
+a:hover { color: var(--crit); }
+table { border-collapse: collapse; width: 100%; }
+input, textarea, button, select { font-family: inherit; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: rgba(90,100,120,.35); border-radius: 6px; }
+
+/* Numbers that are being compared — days left, money — must line up. */
+.tnum { font-variant-numeric: tabular-nums; }
+
+/* The countdown number. Weight and colour carry the urgency, so it still reads
+   correctly in a screenshot, printed, or by someone who cannot see red. */
+.hero-num { font-family: Archivo, sans-serif; line-height: 1; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+.hero-calm { font-weight: 500; color: var(--ink); }
+.hero-warn { font-weight: 700; color: var(--warn); }
+.hero-crit { font-weight: 800; color: var(--crit); }
+.hero-ret  { font-weight: 800; color: var(--crit); text-decoration: line-through; text-decoration-thickness: 2px; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+}
