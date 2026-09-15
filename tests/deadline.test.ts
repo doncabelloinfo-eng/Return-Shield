@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterAll } from 'vitest';
 import { eq } from 'drizzle-orm';
-import { db } from '@/db';
+import { getDb } from '@/db';
 import { productRules, shipments } from '@/db/schema';
 import { TestClock, resetClock } from '@/lib/clock';
 import { ingestEvent } from '@/lib/shipments/ingest';
@@ -29,7 +29,7 @@ afterAll(async () => {
 });
 
 const shipmentRow = async (id: string) =>
-  (await db.select().from(shipments).where(eq(shipments.id, id)))[0];
+  (await getDb().select().from(shipments).where(eq(shipments.id, id)))[0];
 
 describe('the office deadline', () => {
   it('is arrival plus the product rule, never a hardcoded fifteen', async () => {
@@ -81,7 +81,7 @@ describe('the office deadline', () => {
     expect(madridDateKey((await shipmentRow(a.shipmentId)).officeDeadline!)).toBe('2026-09-16');
 
     // Correos says it is seven days after all.
-    await db.update(productRules).set({ depositDays: 7 })
+    await getDb().update(productRules).set({ depositDays: 7 })
       .where(eq(productRules.productCode, 'PAQ ESTÁNDAR'));
     await recalculateDeadlines('PAQ ESTÁNDAR');
 
@@ -101,7 +101,7 @@ describe('the office deadline', () => {
     clock.set('2026-09-10T10:00:00+02:00');
     expect(daysLeft((await shipmentRow(f.shipmentId)).officeDeadline!)).toBe(6);
 
-    await db.update(productRules).set({ depositDays: 5 })
+    await getDb().update(productRules).set({ depositDays: 5 })
       .where(eq(productRules.productCode, 'PAQ ESTÁNDAR'));
     await recalculateDeadlines('PAQ ESTÁNDAR');
 

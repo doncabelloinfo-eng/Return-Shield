@@ -1,12 +1,15 @@
 import { desc } from 'drizzle-orm';
-import { db } from '@/db';
+import { getDb } from '@/db';
 import { importBatches } from '@/db/schema';
 import { fmt } from '@/lib/time';
 import { ImportScreen } from '@/components/ImportScreen';
 import { PageHeading } from '@/components/ui';
 
+// Per-request, behind a login or a signed token, and it reads the database.
+// Saying so explicitly keeps it out of the build's static render pass, which
+// is what would otherwise make every build need a live production database.
 export const dynamic = 'force-dynamic';
-
+export const runtime = 'nodejs';
 /**
  * Shopify orders come in on their own. TikTok orders are a file.
  *
@@ -14,7 +17,7 @@ export const dynamic = 'force-dynamic';
  * guess are left for a person, with a box right there to fix them.
  */
 export default async function ImportPage() {
-  const batches = await db.select().from(importBatches)
+  const batches = await getDb().select().from(importBatches)
     .orderBy(desc(importBatches.createdAt)).limit(10);
 
   return (

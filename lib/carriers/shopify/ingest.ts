@@ -1,5 +1,5 @@
 import { and, eq } from 'drizzle-orm';
-import { db } from '@/db';
+import { getDb } from '@/db';
 import { orders, shipments, stores } from '@/db/schema';
 import { normalisePhone } from '@/lib/import/phone';
 import { parseMoneyCents } from '@/lib/import/parse';
@@ -69,7 +69,7 @@ export async function ingestShopifyOrder(
   storeKey: string,
   payload: ShopifyOrderPayload,
 ): Promise<IngestOrderResult> {
-  const [store] = await db.select().from(stores).where(eq(stores.key, storeKey)).limit(1);
+  const [store] = await getDb().select().from(stores).where(eq(stores.key, storeKey)).limit(1);
   if (!store) throw new Error(`shopify: no store configured with key "${storeKey}"`);
 
   const fulfilments = (payload.fulfillments ?? []).filter(isCorreos);
@@ -92,7 +92,7 @@ export async function ingestShopifyOrder(
     joinName(payload.customer?.first_name, payload.customer?.last_name)]
     .find((n) => n && n.trim()) ?? 'Unknown customer';
 
-  const [order] = await db.insert(orders).values({
+  const [order] = await getDb().insert(orders).values({
     storeId: store.id,
     externalOrderId,
     orderNumber: String(payload.name ?? payload.order_number ?? externalOrderId),
@@ -129,7 +129,7 @@ export async function ingestShopifyOrder(
   const created: string[] = [];
   for (const code of unique) {
     const productCode = productCodeOf(fulfilments, code);
-    const [row] = await db.insert(shipments).values({
+    const [row] = await getDb().insert(shipments).values({
       orderId: order.id,
       carrier: 'correos',
       shippingCode: code,
@@ -188,7 +188,7 @@ function productCodeOf(fulfilments: ShopifyFulfilment[], code: string): string {
 }
 
 export async function shipmentExists(shippingCode: string): Promise<boolean> {
-  const [row] = await db.select({ id: shipments.id }).from(shipments)
+  const [row] = await getDb().select({ id: shipments.id }).from(shipments)
     .where(eq(shipments.shippingCode, shippingCode.trim().toUpperCase())).limit(1);
   return Boolean(row);
 }

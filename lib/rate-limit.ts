@@ -1,5 +1,5 @@
 import { and, eq, lt, sql as raw } from 'drizzle-orm';
-import { db } from '@/db';
+import { getDb } from '@/db';
 import { actionRateLimit } from '@/db/schema';
 import { now } from '@/lib/clock';
 
@@ -16,7 +16,7 @@ export async function rateLimit(ip: string, max: number): Promise<{ ok: boolean;
   const at = now();
   const bucket = new Date(Math.floor(at.getTime() / (WINDOW_MINUTES * 60_000)) * WINDOW_MINUTES * 60_000);
 
-  const [row] = await db.insert(actionRateLimit)
+  const [row] = await getDb().insert(actionRateLimit)
     .values({ ip, windowStart: bucket, hits: 1 })
     .onConflictDoUpdate({
       target: [actionRateLimit.ip, actionRateLimit.windowStart],
@@ -30,7 +30,7 @@ export async function rateLimit(ip: string, max: number): Promise<{ ok: boolean;
 /** Old buckets are noise. The nightly job clears them. */
 export async function purgeRateLimits(): Promise<number> {
   const cutoff = new Date(now().getTime() - 24 * 60 * 60 * 1000);
-  const gone = await db.delete(actionRateLimit)
+  const gone = await getDb().delete(actionRateLimit)
     .where(lt(actionRateLimit.windowStart, cutoff))
     .returning({ ip: actionRateLimit.ip });
   return gone.length;

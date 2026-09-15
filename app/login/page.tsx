@@ -1,13 +1,16 @@
 import { redirect } from 'next/navigation';
 import { cookies } from 'next/headers';
 import { eq } from 'drizzle-orm';
-import { db } from '@/db';
+import { getDb } from '@/db';
 import { users } from '@/db/schema';
 import { verifyPassword } from '@/lib/auth/password';
 import { createSession, currentUser, SESSION_COOKIE, sessionCookieOptions } from '@/lib/auth/session';
 
+// Per-request, behind a login or a signed token, and it reads the database.
+// Saying so explicitly keeps it out of the build's static render pass, which
+// is what would otherwise make every build need a live production database.
 export const dynamic = 'force-dynamic';
-
+export const runtime = 'nodejs';
 /**
  * One business, a handful of people, no public signup. Accounts are made with
  * `npm run db:seed` or by hand.
@@ -26,7 +29,7 @@ export default async function LoginPage({ searchParams }: { searchParams: { erro
     const password = String(form.get('password') ?? '');
     if (!email || !password) redirect('/login?error=1');
 
-    const [user] = await db.select().from(users).where(eq(users.email, email)).limit(1);
+    const [user] = await getDb().select().from(users).where(eq(users.email, email)).limit(1);
 
     // Verify even when there is no such user, so a missing account and a wrong
     // password take the same amount of time to fail.

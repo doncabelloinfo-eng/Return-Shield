@@ -1,7 +1,7 @@
 import { randomBytes, createHash } from 'node:crypto';
 import { cookies } from 'next/headers';
 import { and, eq, gt, lt } from 'drizzle-orm';
-import { db } from '@/db';
+import { getDb } from '@/db';
 import { sessions, users } from '@/db/schema';
 import { now, DAY } from '@/lib/clock';
 
@@ -20,7 +20,7 @@ function hash(id: string): string {
 
 export async function createSession(userId: string): Promise<string> {
   const id = randomBytes(32).toString('base64url');
-  await db.insert(sessions).values({
+  await getDb().insert(sessions).values({
     id: hash(id),
     userId,
     createdAt: now(),
@@ -39,7 +39,7 @@ export async function currentUser(): Promise<SessionUser | null> {
   const raw = cookies().get(SESSION_COOKIE)?.value;
   if (!raw) return null;
 
-  const [row] = await db.select({
+  const [row] = await getDb().select({
     id: users.id, email: users.email, name: users.name, disabledAt: users.disabledAt,
   })
     .from(sessions)
@@ -53,7 +53,7 @@ export async function currentUser(): Promise<SessionUser | null> {
 
 export async function destroySession(): Promise<void> {
   const raw = cookies().get(SESSION_COOKIE)?.value;
-  if (raw) await db.delete(sessions).where(eq(sessions.id, hash(raw)));
+  if (raw) await getDb().delete(sessions).where(eq(sessions.id, hash(raw)));
   cookies().delete(SESSION_COOKIE);
 }
 
@@ -69,6 +69,6 @@ export function sessionCookieOptions() {
 
 /** Expired rows are dead weight and a liability. The nightly job clears them. */
 export async function purgeExpiredSessions(): Promise<number> {
-  const gone = await db.delete(sessions).where(lt(sessions.expiresAt, now())).returning({ id: sessions.id });
+  const gone = await getDb().delete(sessions).where(lt(sessions.expiresAt, now())).returning({ id: sessions.id });
   return gone.length;
 }

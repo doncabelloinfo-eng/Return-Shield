@@ -1,6 +1,6 @@
 import { notFound } from 'next/navigation';
 import { and, desc, eq } from 'drizzle-orm';
-import { db } from '@/db';
+import { getDb } from '@/db';
 import { contactLog, shipmentEvents } from '@/db/schema';
 import { loadRows } from '@/lib/views/rows';
 import { ladderInput } from '@/lib/shipments/repo';
@@ -15,8 +15,11 @@ import { FileCall } from '@/components/FileCall';
 import { DangerActions } from '@/components/DangerActions';
 import { EventTimeline } from '@/components/EventTimeline';
 
+// Per-request, behind a login or a signed token, and it reads the database.
+// Saying so explicitly keeps it out of the build's static render pass, which
+// is what would otherwise make every build need a live production database.
 export const dynamic = 'force-dynamic';
-
+export const runtime = 'nodejs';
 /**
  * One parcel, everything about it.
  *
@@ -31,10 +34,10 @@ export default async function ParcelPage({ params }: { params: { id: string } })
   if (!row) notFound();
 
   const [events, log, input] = await Promise.all([
-    db.select().from(shipmentEvents)
+    getDb().select().from(shipmentEvents)
       .where(eq(shipmentEvents.shipmentId, row.id))
       .orderBy(desc(shipmentEvents.occurredAt)),
-    db.select().from(contactLog)
+    getDb().select().from(contactLog)
       .where(eq(contactLog.shipmentId, row.id))
       .orderBy(desc(contactLog.at)),
     ladderInput(row.id),

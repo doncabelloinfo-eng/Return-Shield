@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterAll } from 'vitest';
 import { and, eq } from 'drizzle-orm';
-import { db } from '@/db';
+import { getDb } from '@/db';
 import { notifications, shipments, tasks } from '@/db/schema';
 import { TestClock, resetClock, DAY } from '@/lib/clock';
 import { ingestEvent } from '@/lib/shipments/ingest';
@@ -39,12 +39,12 @@ async function parcelWithToken() {
   });
   await runShipment(f.shipmentId, clock.now());
 
-  const [n] = await db.select().from(notifications).where(eq(notifications.shipmentId, f.shipmentId));
+  const [n] = await getDb().select().from(notifications).where(eq(notifications.shipmentId, f.shipmentId));
   return { ...f, token: n.actionToken!, notificationId: n.id };
 }
 
 const openTasks = (id: string) =>
-  db.select().from(tasks).where(and(eq(tasks.shipmentId, id), eq(tasks.status, 'open')));
+  getDb().select().from(tasks).where(and(eq(tasks.shipmentId, id), eq(tasks.status, 'open')));
 
 describe('a customer opening their link', () => {
   it('sees their own parcel, in Spanish', async () => {
@@ -89,7 +89,7 @@ describe('a customer opening their link', () => {
 
   it('stops working after thirty days', async () => {
     const p = await parcelWithToken();
-    await db.update(notifications)
+    await getDb().update(notifications)
       .set({ tokenExpiresAt: new Date(clock.now().getTime() - DAY) })
       .where(eq(notifications.id, p.notificationId));
 
@@ -103,7 +103,7 @@ describe('a customer opening their link', () => {
     clock.advanceDays(3);
     await runShipment(p.shipmentId, clock.now());
 
-    const all = await db.select().from(notifications).where(eq(notifications.shipmentId, p.shipmentId));
+    const all = await getDb().select().from(notifications).where(eq(notifications.shipmentId, p.shipmentId));
     expect(all.length).toBeGreaterThan(1);
     expect(new Set(all.map((n) => n.actionToken)).size).toBe(all.length);
   });
@@ -112,7 +112,7 @@ describe('a customer opening their link', () => {
 describe('a customer tapping one of the four options', () => {
   it('stops the countdown messages immediately', async () => {
     const p = await parcelWithToken();
-    const before = (await db.select().from(notifications)
+    const before = (await getDb().select().from(notifications)
       .where(eq(notifications.shipmentId, p.shipmentId))).length;
 
     await applyCustomerAction(p.shipmentId, 'ok_address');
@@ -120,7 +120,7 @@ describe('a customer tapping one of the four options', () => {
     clock.advanceDays(10);
     await runShipment(p.shipmentId, clock.now());
 
-    const after = (await db.select().from(notifications)
+    const after = (await getDb().select().from(notifications)
       .where(eq(notifications.shipmentId, p.shipmentId))).length;
     expect(after).toBe(before);
   });
@@ -151,7 +151,7 @@ describe('a customer tapping one of the four options', () => {
     clock.advanceDays(13);
     await runShipment(p.shipmentId, clock.now());
 
-    const templates = (await db.select().from(notifications)
+    const templates = (await getDb().select().from(notifications)
       .where(eq(notifications.shipmentId, p.shipmentId))).map((n) => n.template);
     expect(templates).toContain('office_last_call');
   });
@@ -160,7 +160,7 @@ describe('a customer tapping one of the four options', () => {
     const p = await parcelWithToken();
     await applyCustomerAction(p.shipmentId, 'cant_go');
 
-    const [ship] = await db.select().from(shipments).where(eq(shipments.id, p.shipmentId));
+    const [ship] = await getDb().select().from(shipments).where(eq(shipments.id, p.shipmentId));
     expect(ship.reacted).toBe(true);
     expect(ship.redirectPending).toBe(true);
   });

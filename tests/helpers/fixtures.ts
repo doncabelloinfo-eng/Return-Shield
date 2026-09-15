@@ -1,4 +1,4 @@
-import { db } from '@/db';
+import { getDb } from '@/db';
 import { offices, orders, productRules, shipments, stores } from '@/db/schema';
 
 /**
@@ -31,7 +31,7 @@ export async function makeShipment(opts: MakeShipmentOptions = {}): Promise<Fixt
   const shippingCode = opts.shippingCode ?? `PQ${Math.floor(Math.random() * 1e10)}ES`;
   const productCode = opts.productCode ?? 'PAQ ESTÁNDAR';
 
-  await db.insert(productRules).values({
+  await getDb().insert(productRules).values({
     productCode,
     depositDays: opts.depositDays ?? 15,
     label: 'test',
@@ -41,7 +41,7 @@ export async function makeShipment(opts: MakeShipmentOptions = {}): Promise<Fixt
     set: { depositDays: opts.depositDays ?? 15 },
   });
 
-  const [store] = await db.insert(stores).values({
+  const [store] = await getDb().insert(stores).values({
     key: 'test-store',
     name: opts.storeName ?? 'Cosmetics Afro Latino',
     platform: 'shopify',
@@ -51,7 +51,7 @@ export async function makeShipment(opts: MakeShipmentOptions = {}): Promise<Fixt
     set: { name: opts.storeName ?? 'Cosmetics Afro Latino' },
   }).returning({ id: stores.id });
 
-  const [order] = await db.insert(orders).values({
+  const [order] = await getDb().insert(orders).values({
     storeId: store.id,
     externalOrderId: `ext-${shippingCode}`,
     orderNumber: `ORD-${shippingCode.slice(-4)}`,
@@ -68,7 +68,7 @@ export async function makeShipment(opts: MakeShipmentOptions = {}): Promise<Fixt
     placedAt: opts.placedAt ?? new Date('2026-09-01T08:00:00Z'),
   }).returning({ id: orders.id });
 
-  const [ship] = await db.insert(shipments).values({
+  const [ship] = await getDb().insert(shipments).values({
     orderId: order.id,
     shippingCode,
     productCode,
@@ -76,7 +76,7 @@ export async function makeShipment(opts: MakeShipmentOptions = {}): Promise<Fixt
   }).returning({ id: shipments.id });
 
   const officeCode = 'OF-MAD-12';
-  await db.insert(offices).values({
+  await getDb().insert(offices).values({
     correosCode: officeCode,
     name: 'Oficina Madrid Sucursal 12',
     address: 'C/ Mejía Lequerica 8, 28004 Madrid',

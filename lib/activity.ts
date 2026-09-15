@@ -1,5 +1,5 @@
 import { desc } from 'drizzle-orm';
-import { db } from '@/db';
+import { getDb } from '@/db';
 import { activity } from '@/db/schema';
 import { now } from '@/lib/clock';
 
@@ -12,9 +12,9 @@ import { now } from '@/lib/clock';
  * line says what it meant, not what changed in the database.
  */
 export async function say(text: string, shipmentId?: string, kind = 'system'): Promise<void> {
-  await db.insert(activity).values({ at: now(), text, shipmentId: shipmentId ?? null, kind });
+  await getDb().insert(activity).values({ at: now(), text, shipmentId: shipmentId ?? null, kind });
 }
 
 export async function recentActivity(limit = 24) {
-  return db.select().from(activity).orderBy(desc(activity.at)).limit(limit);
+  return getDb().select().from(activity).orderBy(desc(activity.at)).limit(limit);
 }

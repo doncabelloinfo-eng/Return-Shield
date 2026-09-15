@@ -3,7 +3,7 @@
 import { revalidatePath } from 'next/cache';
 import { cookies } from 'next/headers';
 import { eq } from 'drizzle-orm';
-import { db } from '@/db';
+import { getDb } from '@/db';
 import { productRules } from '@/db/schema';
 import { requireUser } from '@/lib/auth/guard';
 import { recalculateDeadlines } from '@/lib/shipments/repo';
@@ -21,7 +21,7 @@ export async function setDepositDays(productCode: string, days: number) {
   await requireUser();
   const clamped = Math.max(1, Math.min(30, Math.round(days)));
 
-  await db.update(productRules)
+  await getDb().update(productRules)
     .set({ depositDays: clamped, updatedAt: now() })
     .where(eq(productRules.productCode, productCode));
 
@@ -32,7 +32,7 @@ export async function setDepositDays(productCode: string, days: number) {
 
 export async function markDepositConfirmed(productCode: string, confirmed: boolean) {
   await requireUser();
-  await db.update(productRules)
+  await getDb().update(productRules)
     .set({ confirmedWithCarrier: confirmed, updatedAt: now() })
     .where(eq(productRules.productCode, productCode));
   revalidatePath('/', 'layout');

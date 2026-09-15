@@ -1,8 +1,11 @@
 import { resolveToken, markLinkOpened } from '@/lib/customer-page';
 import { CustomerActions } from '@/components/CustomerActions';
 
+// Per-request, behind a login or a signed token, and it reads the database.
+// Saying so explicitly keeps it out of the build's static render pass, which
+// is what would otherwise make every build need a live production database.
 export const dynamic = 'force-dynamic';
-
+export const runtime = 'nodejs';
 /**
  * The customer's own page. No login: the signed token in the URL is the
  * credential, and it carries no personal data of its own.

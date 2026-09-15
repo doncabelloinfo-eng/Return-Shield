@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { sql } from '@/db';
+import { getSql, closeDb } from '@/db';
 import { runTick } from '@/lib/escalation/run';
 import { liveShipmentIds } from '@/lib/shipments/repo';
 import { setClock } from '@/lib/clock';
@@ -31,7 +31,7 @@ async function main(): Promise<void> {
   const at = when ? new Date(when) : new Date();
   const result = await runTick(await liveShipmentIds(), at);
   console.log(JSON.stringify(result, null, 2));
-  await sql.end();
+  await closeDb();
 }
 
 main().catch((err) => { console.error(err); process.exit(1); });

@@ -2,7 +2,7 @@
 
 import { revalidatePath } from 'next/cache';
 import { and, eq, inArray } from 'drizzle-orm';
-import { db } from '@/db';
+import { getDb } from '@/db';
 import { shipments, stores } from '@/db/schema';
 import { requireUser } from '@/lib/auth/guard';
 import { buildPreview, parseFile, type PreviewRow } from '@/lib/import/parse';
@@ -64,7 +64,7 @@ export async function previewUpload(form: FormData): Promise<PreviewResult> {
     .filter(Boolean);
 
   const known = codes.length
-    ? new Set((await db.select({ code: shipments.shippingCode }).from(shipments)
+    ? new Set((await getDb().select({ code: shipments.shippingCode }).from(shipments)
         .where(inArray(shipments.shippingCode, codes))).map((r) => r.code))
     : new Set<string>();
 
@@ -87,7 +87,7 @@ export async function confirmUpload(
   const user = await requireUser();
 
   // The TikTok store is created on first use rather than needing setup first.
-  const [store] = await db.insert(stores).values({
+  const [store] = await getDb().insert(stores).values({
     key: 'tiktok-es',
     name: 'TikTok Shop ES',
     platform: 'tiktok',

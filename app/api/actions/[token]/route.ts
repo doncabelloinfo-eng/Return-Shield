@@ -1,14 +1,16 @@
 import { NextResponse } from 'next/server';
-import { db } from '@/db';
+import { getDb } from '@/db';
 import { shipmentActions } from '@/db/schema';
 import { resolveToken } from '@/lib/customer-page';
 import { applyCustomerAction, isCustomerAction } from '@/lib/escalation/outcomes';
 import { clientIp, rateLimit } from '@/lib/rate-limit';
 import { now } from '@/lib/clock';
 
-export const runtime = 'nodejs';
+// Per-request, behind a login or a signed token, and it reads the database.
+// Saying so explicitly keeps it out of the build's static render pass, which
+// is what would otherwise make every build need a live production database.
 export const dynamic = 'force-dynamic';
-
+export const runtime = 'nodejs';
 /**
  * The customer tapped something. This is the only endpoint in the system that
  * accepts a write from somebody who is not signed in, so it is the only one
@@ -47,7 +49,7 @@ export async function POST(
     return NextResponse.json({ message }, { status: 410 });
   }
 
-  await db.insert(shipmentActions).values({
+  await getDb().insert(shipmentActions).values({
     shipmentId: resolved.view.shipmentId,
     notificationId: resolved.view.notificationId,
     token: params.token,

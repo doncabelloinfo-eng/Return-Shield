@@ -6,7 +6,7 @@ import {
   askCorreos, confirmAddress, dropIt, isCallOutcome, logCall,
   restock, sendRedirect, undoDrop, undoRestock,
 } from '@/lib/escalation/outcomes';
-import { db } from '@/db';
+import { getDb } from '@/db';
 import { notifications } from '@/db/schema';
 import { eq } from 'drizzle-orm';
 import { now } from '@/lib/clock';
@@ -94,7 +94,7 @@ export async function confirmAddressNow(shipmentId: string) {
  */
 export async function markMessageCopied(notificationId: string) {
   await requireUser();
-  await db.update(notifications)
+  await getDb().update(notifications)
     .set({ status: 'copied', sentAt: now() })
     .where(eq(notifications.id, notificationId));
   refresh();

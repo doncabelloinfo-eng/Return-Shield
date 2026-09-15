@@ -14,7 +14,8 @@
     "test:watch": "npm run db:migrate:test && vitest",
     "typecheck": "tsc --noEmit",
     "lint": "next lint",
-    "db:migrate:test": "tsx db/migrate-test.ts"
+    "db:migrate:test": "tsx db/migrate-test.ts",
+    "job": "tsx jobs/run-once.ts"
   },
   "dependencies": {
     "date-fns": "^4.4.0",

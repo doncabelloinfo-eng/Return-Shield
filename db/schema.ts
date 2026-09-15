@@ -123,6 +123,16 @@ export const shipments = pgTable('shipments', {
   redirectPending: boolean('redirect_pending').notNull().default(false),
   // Did the customer ever answer a message or tap the action page?
   reacted: boolean('reacted').notNull().default(false),
+  /**
+   * When the reconcile sweep last asked Correos about this parcel.
+   *
+   * This is the sweep's cursor. Ordering by it, nulls first, means a run that
+   * is cut short simply leaves the rest with an older stamp and the next run
+   * picks them up — no offset to persist, nothing to get out of step when
+   * parcels are added or finish, and no parcel can be starved because the one
+   * checked longest ago is always next.
+   */
+  lastReconciledAt: timestamp('last_reconciled_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, (t) => ({
   codeIdx: uniqueIndex('shipments_shipping_code_idx').on(t.shippingCode),
@@ -130,6 +140,8 @@ export const shipments = pgTable('shipments', {
   stateIdx: index('shipments_state_idx').on(t.state),
   deadlineIdx: index('shipments_deadline_idx').on(t.officeDeadline),
   lastEventIdx: index('shipments_last_event_idx').on(t.lastEventAt),
+  // The sweep's index: oldest-checked first, among the live ones.
+  reconcileIdx: index('shipments_reconcile_idx').on(t.lastReconciledAt),
 }));
 
 /**

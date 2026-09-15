@@ -1,5 +1,5 @@
 import { and, eq, inArray } from 'drizzle-orm';
-import { db } from '@/db';
+import { getDb } from '@/db';
 import { tasks } from '@/db/schema';
 import { now } from '@/lib/clock';
 import type { TaskType } from './decide';
@@ -30,11 +30,11 @@ export interface OpenTaskSpec {
  * every tick that finds the same work still outstanding.
  */
 export async function openTask(spec: OpenTaskSpec): Promise<'opened' | 'refreshed'> {
-  const before = await db.select({ id: tasks.id }).from(tasks)
+  const before = await getDb().select({ id: tasks.id }).from(tasks)
     .where(and(eq(tasks.shipmentId, spec.shipmentId), eq(tasks.type, spec.type), eq(tasks.status, 'open')))
     .limit(1);
 
-  await db.insert(tasks)
+  await getDb().insert(tasks)
     .values({
       shipmentId: spec.shipmentId,
       type: spec.type,
@@ -66,7 +66,7 @@ export async function closeTasks(
     ? and(eq(tasks.shipmentId, shipmentId), eq(tasks.status, 'open'), inArray(tasks.type, types as TaskType[]))
     : and(eq(tasks.shipmentId, shipmentId), eq(tasks.status, 'open'));
 
-  await db.update(tasks).set({
+  await getDb().update(tasks).set({
     status: 'done',
     closedAt: now(),
     outcome: outcome?.outcome ?? null,
@@ -76,6 +76,6 @@ export async function closeTasks(
 }
 
 export async function openTasksFor(shipmentId: string) {
-  return db.select().from(tasks)
+  return getDb().select().from(tasks)
     .where(and(eq(tasks.shipmentId, shipmentId), eq(tasks.status, 'open')));
 }

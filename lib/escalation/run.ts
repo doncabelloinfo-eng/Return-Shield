@@ -1,5 +1,5 @@
 import { eq } from 'drizzle-orm';
-import { db } from '@/db';
+import { getDb } from '@/db';
 import { notifications, offices, orders, shipments, stores } from '@/db/schema';
 import { now, DAY } from '@/lib/clock';
 import { say } from '@/lib/activity';
@@ -241,7 +241,7 @@ async function deliverMessage(
     actionUrl: step2 ? actionUrl : null,
   } satisfies MessageContext);
 
-  const [row] = await db.insert(notifications).values({
+  const [row] = await getDb().insert(notifications).values({
     shipmentId,
     template: built.template,
     body: built.body,
@@ -273,7 +273,7 @@ async function deliverMessage(
   }
 
   if (!ctx.phoneE164 || ctx.phoneStatus !== 'ok') {
-    await db.update(notifications)
+    await getDb().update(notifications)
       .set({ status: 'failed', error: `cannot message a ${ctx.phoneStatus} number` })
       .where(eq(notifications.id, row.id));
     await openTask({
@@ -290,7 +290,7 @@ async function deliverMessage(
   }
 
   const sent = await provider.send(ctx.phoneE164, built, actionUrl);
-  await db.update(notifications).set({
+  await getDb().update(notifications).set({
     status: sent.status,
     sentAt: sent.status === 'sent' ? now() : null,
     providerMessageId: sent.providerMessageId,
@@ -330,7 +330,7 @@ interface MessageContextRow {
 }
 
 async function messageContextFor(shipmentId: string): Promise<MessageContextRow | null> {
-  const [row] = await db.select({
+  const [row] = await getDb().select({
     customerName: orders.customerName,
     storeName: stores.name,
     orderNumber: orders.orderNumber,

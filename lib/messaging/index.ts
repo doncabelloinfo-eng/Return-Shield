@@ -22,23 +22,46 @@ export function messageProvider(): MessageProvider {
   }
 
   if (kind === 'whatsapp-cloud') {
-    const apiUrl = required('WHATSAPP_API_URL');
-    const token = required('WHATSAPP_API_TOKEN');
-    const phoneNumberId = required('WHATSAPP_PHONE_NUMBER_ID');
+    const apiUrl = process.env.WHATSAPP_API_URL;
+    const token = process.env.WHATSAPP_API_TOKEN;
+    const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+
+    if (!apiUrl || !token || !phoneNumberId) {
+      // Half-configured is not a reason to take the escalation engine down.
+      // Falling back to Step 1 means every message is still written at exactly
+      // the right moment and put in front of an operator — the parcels keep
+      // being chased, by hand, until somebody sets the rest of the variables.
+      // The Settings screen says so in as many words.
+      warnOnce(
+        'WHATSAPP_PROVIDER is "whatsapp-cloud" but WHATSAPP_API_URL / _TOKEN / '
+        + '_PHONE_NUMBER_ID are not all set. Messages will be written for an operator '
+        + 'to send rather than sent automatically.',
+      );
+      cached = new NoProvider();
+      return cached;
+    }
+
     cached = new WhatsAppCloudProvider(apiUrl, token, phoneNumberId);
     return cached;
   }
 
-  throw new Error(`messaging: unknown WHATSAPP_PROVIDER "${kind}"`);
+  // An unrecognised provider is a typo in an environment variable. Falling back
+  // to writing messages by hand is wrong in a small way; refusing to escalate
+  // anything at all is wrong in a large one.
+  warnOnce(`Unknown WHATSAPP_PROVIDER "${kind}" — falling back to Step 1.`);
+  cached = new NoProvider();
+  return cached;
+}
+
+const warned = new Set<string>();
+function warnOnce(message: string): void {
+  if (warned.has(message)) return;
+  warned.add(message);
+  console.warn(`[messaging] ${message}`);
 }
 
 /** Tests swap the provider; nothing else should. */
 export function setMessageProvider(p: MessageProvider | null): void {
   cached = p;
-}
-
-function required(key: string): string {
-  const v = process.env[key];
-  if (!v) throw new Error(`messaging: ${key} is required when WHATSAPP_PROVIDER is set`);
-  return v;
+  warned.clear();
 }

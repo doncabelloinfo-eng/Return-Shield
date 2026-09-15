@@ -1,5 +1,5 @@
 import { and, eq, inArray, isNull, notInArray } from 'drizzle-orm';
-import { db } from '@/db';
+import { getDb } from '@/db';
 import {
   escalationExtras, escalationFires, offices, orders, productRules,
   shipmentEvents, shipments, tasks,
@@ -16,7 +16,7 @@ import { getSetting } from '@/lib/settings';
 
 /** How long the office holds this product. Never falls back to 15 silently. */
 export async function depositDaysFor(productCode: string): Promise<number> {
-  const [rule] = await db.select().from(productRules)
+  const [rule] = await getDb().select().from(productRules)
     .where(eq(productRules.productCode, productCode)).limit(1);
 
   if (rule) return rule.depositDays;
@@ -24,11 +24,11 @@ export async function depositDaysFor(productCode: string): Promise<number> {
   // An unknown product code is a configuration gap, not a reason to guess. We
   // create the rule with the working assumption and flag it as unconfirmed so
   // it shows up on the Settings screen asking to be checked with Correos.
-  const [fallback] = await db.select().from(productRules)
+  const [fallback] = await getDb().select().from(productRules)
     .where(eq(productRules.productCode, '*')).limit(1);
   const days = fallback?.depositDays ?? 15;
 
-  await db.insert(productRules)
+  await getDb().insert(productRules)
     .values({ productCode, depositDays: days, label: 'Added automatically — never confirmed with Correos', confirmedWithCarrier: false })
     .onConflictDoNothing();
 
@@ -36,7 +36,7 @@ export async function depositDaysFor(productCode: string): Promise<number> {
 }
 
 export async function eventsFor(shipmentId: string): Promise<ProjectableEvent[]> {
-  const rows = await db.select({
+  const rows = await getDb().select({
     eventCode: shipmentEvents.eventCode,
     eventDesc: shipmentEvents.eventDesc,
     occurredAt: shipmentEvents.occurredAt,
@@ -56,7 +56,7 @@ export async function eventsFor(shipmentId: string): Promise<ProjectableEvent[]>
  * and replay" a real option rather than a hope.
  */
 export async function reproject(shipmentId: string): Promise<Projection> {
-  const [ship] = await db.select().from(shipments).where(eq(shipments.id, shipmentId)).limit(1);
+  const [ship] = await getDb().select().from(shipments).where(eq(shipments.id, shipmentId)).limit(1);
   if (!ship) throw new Error(`reproject: no shipment ${shipmentId}`);
 
   const depositDays = await depositDaysFor(ship.productCode);
@@ -64,12 +64,12 @@ export async function reproject(shipmentId: string): Promise<Projection> {
 
   let officeId = ship.officeId;
   if (p.officeCode) {
-    const [office] = await db.select({ id: offices.id }).from(offices)
+    const [office] = await getDb().select({ id: offices.id }).from(offices)
       .where(eq(offices.correosCode, p.officeCode)).limit(1);
     if (office) officeId = office.id;
   }
 
-  await db.update(shipments).set({
+  await getDb().update(shipments).set({
     state: p.state,
     stateSince: p.stateSince,
     officeArrivedAt: p.officeArrivedAt,
@@ -84,14 +84,14 @@ export async function reproject(shipmentId: string): Promise<Projection> {
 
 /** Rebuild every shipment. Used after a normaliser fix. */
 export async function reprojectAll(): Promise<number> {
-  const rows = await db.select({ id: shipments.id }).from(shipments);
+  const rows = await getDb().select({ id: shipments.id }).from(shipments);
   for (const r of rows) await reproject(r.id);
   return rows.length;
 }
 
 /** Deposit days changed: every live deadline is now a different day. */
 export async function recalculateDeadlines(productCode?: string): Promise<number> {
-  const rows = await db.select({ id: shipments.id }).from(shipments).where(
+  const rows = await getDb().select({ id: shipments.id }).from(shipments).where(
     productCode
       ? and(eq(shipments.productCode, productCode), isNull(shipments.droppedAt))
       : isNull(shipments.droppedAt),
@@ -103,13 +103,13 @@ export async function recalculateDeadlines(productCode?: string): Promise<number
 /* -------------------------------------------------------------------------- */
 
 export async function ladderInput(shipmentId: string): Promise<LadderInput> {
-  const [ship] = await db.select().from(shipments).where(eq(shipments.id, shipmentId)).limit(1);
+  const [ship] = await getDb().select().from(shipments).where(eq(shipments.id, shipmentId)).limit(1);
   if (!ship) throw new Error(`ladderInput: no shipment ${shipmentId}`);
 
   const [fires, extras, staleAfterHours] = await Promise.all([
-    db.select({ rungId: escalationFires.rungId }).from(escalationFires)
+    getDb().select({ rungId: escalationFires.rungId }).from(escalationFires)
       .where(eq(escalationFires.shipmentId, shipmentId)),
-    db.select().from(escalationExtras).where(eq(escalationExtras.shipmentId, shipmentId)),
+    getDb().select().from(escalationExtras).where(eq(escalationExtras.shipmentId, shipmentId)),
     getSetting('staleAfterHours'),
   ]);
 
@@ -130,7 +130,7 @@ export async function ladderInput(shipmentId: string): Promise<LadderInput> {
 
 /** Shipments the engine still has work to do on. */
 export async function liveShipmentIds(): Promise<string[]> {
-  const rows = await db.select({ id: shipments.id }).from(shipments).where(and(
+  const rows = await getDb().select({ id: shipments.id }).from(shipments).where(and(
     isNull(shipments.droppedAt),
     notInArray(shipments.state, ['delivered', 'collected', 'returned']),
   ));
@@ -139,7 +139,7 @@ export async function liveShipmentIds(): Promise<string[]> {
 
 /** Everything a screen needs about one parcel, in one query. */
 export async function shipmentDetail(shipmentId: string) {
-  const [row] = await db.select({
+  const [row] = await getDb().select({
     shipment: shipments,
     order: orders,
     office: offices,
@@ -154,7 +154,7 @@ export async function shipmentDetail(shipmentId: string) {
 
 export async function openTaskRows(shipmentIds: readonly string[]) {
   if (!shipmentIds.length) return [];
-  return db.select().from(tasks).where(and(
+  return getDb().select().from(tasks).where(and(
     inArray(tasks.shipmentId, shipmentIds as string[]),
     eq(tasks.status, 'open'),
   ));

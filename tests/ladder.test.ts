@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterAll } from 'vitest';
 import { and, eq } from 'drizzle-orm';
-import { db } from '@/db';
+import { getDb } from '@/db';
 import { escalationFires, notifications, shipments, tasks } from '@/db/schema';
 import { TestClock, resetClock, DAY, HOUR, MINUTE } from '@/lib/clock';
 import { ingestEvent } from '@/lib/shipments/ingest';
@@ -51,10 +51,10 @@ async function push(shippingCode: string, desc: string, at: Date, office?: strin
 }
 
 const openTasks = (id: string) =>
-  db.select().from(tasks).where(and(eq(tasks.shipmentId, id), eq(tasks.status, 'open')));
+  getDb().select().from(tasks).where(and(eq(tasks.shipmentId, id), eq(tasks.status, 'open')));
 
 const sentMessages = (id: string) =>
-  db.select().from(notifications).where(eq(notifications.shipmentId, id));
+  getDb().select().from(notifications).where(eq(notifications.shipmentId, id));
 
 describe('the ladder, from a failed delivery to a return', () => {
   it('walks every rung in order, on the day each is due', async () => {
@@ -62,7 +62,7 @@ describe('the ladder, from a failed delivery to a return', () => {
 
     // The postman calls and nobody is home.
     await push(f.shippingCode, 'Intento de entrega fallido — ausente', clock.now());
-    let ship = (await db.select().from(shipments).where(eq(shipments.id, f.shipmentId)))[0];
+    let ship = (await getDb().select().from(shipments).where(eq(shipments.id, f.shipmentId)))[0];
     expect(ship.state).toBe('failed');
 
     // Nothing fires in the first quarter of an hour.
@@ -93,7 +93,7 @@ describe('the ladder, from a failed delivery to a return', () => {
     // never from our arithmetic.
     const arrived = clock.advanceHours(24);
     await push(f.shippingCode, 'Disponible en oficina para recoger', arrived, f.officeCode);
-    ship = (await db.select().from(shipments).where(eq(shipments.id, f.shipmentId)))[0];
+    ship = (await getDb().select().from(shipments).where(eq(shipments.id, f.shipmentId)))[0];
     expect(ship.state).toBe('at_office');
     expect(ship.officeDeadline).not.toBeNull();
 
@@ -131,7 +131,7 @@ describe('the ladder, from a failed delivery to a return', () => {
     // invent a Correos event that never happened.
     clock.advanceDays(2);
     await runShipment(f.shipmentId, clock.now());
-    const fired = await db.select().from(escalationFires)
+    const fired = await getDb().select().from(escalationFires)
       .where(eq(escalationFires.shipmentId, f.shipmentId));
     expect(fired.map((x) => x.rungId)).toContain('o0');
     expect((await openTasks(f.shipmentId)).some((t) => t.reason === 'deposit_window_over')).toBe(true);
@@ -139,7 +139,7 @@ describe('the ladder, from a failed delivery to a return', () => {
     // And when Correos does say it is coming back, everything stops and the
     // only job left is the stock.
     await push(f.shippingCode, 'Devolución a origen iniciada', clock.now());
-    ship = (await db.select().from(shipments).where(eq(shipments.id, f.shipmentId)))[0];
+    ship = (await getDb().select().from(shipments).where(eq(shipments.id, f.shipmentId)))[0];
     expect(ship.state).toBe('returning');
     const finalTasks = await openTasks(f.shipmentId);
     expect(finalTasks.map((t) => t.type)).toContain('receive_return');
@@ -248,7 +248,7 @@ describe('call outcomes set their own follow-up', () => {
     await runShipment(f.shipmentId, clock.now());
     expect((await sentMessages(f.shipmentId)).length).toBe(before);
 
-    const [ship] = await db.select().from(shipments).where(eq(shipments.id, f.shipmentId));
+    const [ship] = await getDb().select().from(shipments).where(eq(shipments.id, f.shipmentId));
     expect(ship.redirectPending).toBe(true);
     expect((await openTasks(f.shipmentId)).some((t) => t.type === 'address_fix')).toBe(true);
   });

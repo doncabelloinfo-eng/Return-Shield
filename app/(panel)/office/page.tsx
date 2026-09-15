@@ -1,12 +1,15 @@
 import { officeView } from '@/lib/views/rows';
-import { db } from '@/db';
+import { getDb } from '@/db';
 import { productRules, stores } from '@/db/schema';
 import { ParcelTable } from '@/components/ParcelTable';
 import { OfficeFilters } from '@/components/OfficeFilters';
 import { PageHeading, Empty } from '@/components/ui';
 
+// Per-request, behind a login or a signed token, and it reads the database.
+// Saying so explicitly keeps it out of the build's static render pass, which
+// is what would otherwise make every build need a live production database.
 export const dynamic = 'force-dynamic';
-
+export const runtime = 'nodejs';
 /**
  * Every parcel a post office is holding, most urgent first. One decided next
  * step per row; everything else is behind the ⋯.
@@ -18,8 +21,8 @@ export default async function OfficePage({
 }) {
   const [rows, storeRows, rules] = await Promise.all([
     officeView(),
-    db.select({ name: stores.name }).from(stores),
-    db.select().from(productRules),
+    getDb().select({ name: stores.name }).from(stores),
+    getDb().select().from(productRules),
   ]);
 
   const q = (searchParams.q ?? '').trim().toLowerCase();

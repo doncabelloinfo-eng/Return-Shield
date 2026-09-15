@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import { randomInt } from 'node:crypto';
 import { eq } from 'drizzle-orm';
-import { db, sql } from '@/db';
+import { getDb, getSql, closeDb } from '@/db';
 import { users } from '@/db/schema';
 import { hashPassword } from '@/lib/auth/password';
 
@@ -26,19 +26,19 @@ async function main(): Promise<void> {
   const passwordHash = await hashPassword(password);
   const lower = email.trim().toLowerCase();
 
-  const [existing] = await db.select({ id: users.id }).from(users).where(eq(users.email, lower)).limit(1);
+  const [existing] = await getDb().select({ id: users.id }).from(users).where(eq(users.email, lower)).limit(1);
 
   if (existing) {
-    await db.update(users).set({ passwordHash, disabledAt: null }).where(eq(users.id, existing.id));
+    await getDb().update(users).set({ passwordHash, disabledAt: null }).where(eq(users.id, existing.id));
     console.log(`Password reset for ${lower}`);
   } else {
-    await db.insert(users).values({ email: lower, name, passwordHash });
+    await getDb().insert(users).values({ email: lower, name, passwordHash });
     console.log(`Created ${lower}`);
   }
 
   console.log(`Password: ${password}`);
   console.log('Shown once. Send it to them out of band and have them change it.');
-  await sql.end();
+  await closeDb();
 }
 
 function generatePassword(): string {

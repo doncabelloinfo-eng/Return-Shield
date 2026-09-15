@@ -1,5 +1,5 @@
 import { eq } from 'drizzle-orm';
-import { db } from '@/db';
+import { getDb } from '@/db';
 import { settings } from '@/db/schema';
 
 /**
@@ -33,7 +33,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
 };
 
 export async function getSettings(): Promise<AppSettings> {
-  const rows = await db.select().from(settings);
+  const rows = await getDb().select().from(settings);
   const out = { ...DEFAULT_SETTINGS };
   for (const row of rows) {
     if (row.key in out) {
@@ -44,12 +44,12 @@ export async function getSettings(): Promise<AppSettings> {
 }
 
 export async function getSetting<K extends keyof AppSettings>(key: K): Promise<AppSettings[K]> {
-  const [row] = await db.select().from(settings).where(eq(settings.key, key)).limit(1);
+  const [row] = await getDb().select().from(settings).where(eq(settings.key, key)).limit(1);
   return (row?.value as AppSettings[K]) ?? DEFAULT_SETTINGS[key];
 }
 
 export async function setSetting<K extends keyof AppSettings>(key: K, value: AppSettings[K]): Promise<void> {
-  await db.insert(settings)
+  await getDb().insert(settings)
     .values({ key, value: value as unknown as object, updatedAt: new Date() })
     .onConflictDoUpdate({
       target: settings.key,

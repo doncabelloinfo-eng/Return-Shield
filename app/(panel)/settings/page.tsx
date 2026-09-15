@@ -1,11 +1,16 @@
 import { sql as raw, eq, desc, isNull } from 'drizzle-orm';
-import { db } from '@/db';
+import { getDb } from '@/db';
 import { eventReviewQueue, postcodeStats, productRules, shipments } from '@/db/schema';
 import { DepositRow } from '@/components/DepositRow';
+import { IntegrationsPanel } from '@/components/IntegrationsPanel';
+import { integrationStatus } from '@/lib/integrations';
 import { Card, PageHeading } from '@/components/ui';
 
+// Per-request, behind a login or a signed token, and it reads the database.
+// Saying so explicitly keeps it out of the build's static render pass, which
+// is what would otherwise make every build need a live production database.
 export const dynamic = 'force-dynamic';
-
+export const runtime = 'nodejs';
 /**
  * The one number everything hangs off.
  *
@@ -14,14 +19,15 @@ export const dynamic = 'force-dynamic';
  * office list re-sorts straight away.
  */
 export default async function SettingsPage() {
-  const [rules, counts, watched, review] = await Promise.all([
-    db.select().from(productRules).orderBy(productRules.productCode),
-    db.select({ code: shipments.productCode, n: raw<number>`count(*)::int` })
+  const [rules, counts, watched, review, integrations] = await Promise.all([
+    getDb().select().from(productRules).orderBy(productRules.productCode),
+    getDb().select({ code: shipments.productCode, n: raw<number>`count(*)::int` })
       .from(shipments).groupBy(shipments.productCode),
-    db.select().from(postcodeStats).where(eq(postcodeStats.watch, true)).orderBy(desc(postcodeStats.failRate)),
-    db.select().from(eventReviewQueue)
+    getDb().select().from(postcodeStats).where(eq(postcodeStats.watch, true)).orderBy(desc(postcodeStats.failRate)),
+    getDb().select().from(eventReviewQueue)
       .where(isNull(eventReviewQueue.resolvedAt))
       .orderBy(desc(eventReviewQueue.lastSeenAt)).limit(20),
+    integrationStatus(),
   ]);
 
   const countFor = (code: string) => counts.find((c) => c.code === code)?.n ?? 0;
@@ -69,6 +75,10 @@ export default async function SettingsPage() {
       >
         Cutting the days can put a parcel past its last day straight away — exactly what happens
         in real life when Correos changes how long they hold things.
+      </div>
+
+      <div className="mt-[22px]">
+        <IntegrationsPanel integrations={integrations} />
       </div>
 
       <div className="mt-[22px] rounded-[5px] border border-line bg-surface px-4 py-[14px]">

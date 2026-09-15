@@ -2,8 +2,11 @@ import { callsView } from '@/lib/views/rows';
 import { CallList } from '@/components/CallList';
 import { PageHeading } from '@/components/ui';
 
+// Per-request, behind a login or a signed token, and it reads the database.
+// Saying so explicitly keeps it out of the build's static render pass, which
+// is what would otherwise make every build need a live production database.
 export const dynamic = 'force-dynamic';
-
+export const runtime = 'nodejs';
 /**
  * Twenty calls without touching the mouse.
  *

@@ -1,5 +1,5 @@
 import { eq } from 'drizzle-orm';
-import { db } from '@/db';
+import { getDb } from '@/db';
 import { contactLog, offices, orders, shipments } from '@/db/schema';
 import { now, DAY } from '@/lib/clock';
 import { say } from '@/lib/activity';
@@ -33,7 +33,7 @@ export async function logCall(
   const ctx = await context(shipmentId);
   const at = now();
 
-  await db.insert(contactLog).values({
+  await getDb().insert(contactLog).values({
     shipmentId, at, outcome, note: note.trim(), userId: userId ?? null,
   });
 
@@ -43,7 +43,7 @@ export async function logCall(
       // The last warning and the return alert stay armed: a promise is not a
       // collection, and this is exactly the case where one gets forgotten.
       const until = new Date(at.getTime() + 3 * DAY);
-      await db.update(shipments).set({
+      await getDb().update(shipments).set({
         reacted: true, mutedUntil: until, snoozeReason: 'Said they would pick it up',
       }).where(eq(shipments.id, shipmentId));
       await silence(shipmentId, { keepFinal: true });
@@ -57,7 +57,7 @@ export async function logCall(
     }
 
     case 'Wants new address': {
-      await db.update(shipments).set({
+      await getDb().update(shipments).set({
         reacted: true, redirectPending: true, mutedUntil: null, snoozeReason: null,
       }).where(eq(shipments.id, shipmentId));
       await silence(shipmentId, { keepFinal: true });
@@ -82,11 +82,11 @@ export async function logCall(
     }
 
     case "Doesn't want it": {
-      await db.update(shipments).set({ reacted: true, mutedUntil: null, snoozeReason: null })
+      await getDb().update(shipments).set({ reacted: true, mutedUntil: null, snoozeReason: null })
         .where(eq(shipments.id, shipmentId));
       await silence(shipmentId, { keepFinal: false });
       await closeTasks(shipmentId, ['call', 'contact'], { outcome, note });
-      await db.update(orders).set({ repeatRisk: true }).where(eq(orders.id, ctx.orderId));
+      await getDb().update(orders).set({ repeatRisk: true }).where(eq(orders.id, ctx.orderId));
       await openTask({
         shipmentId, type: 'receive_return', reason: 'customer_refused_on_call',
         label: 'Put back in stock when it lands',
@@ -132,11 +132,11 @@ export async function applyCustomerAction(shipmentId: string, action: CustomerAc
   const ctx = await context(shipmentId);
   const label = CUSTOMER_ACTIONS[action];
 
-  await db.insert(contactLog).values({
+  await getDb().insert(contactLog).values({
     shipmentId, at: now(), outcome: 'Customer replied', note: label,
   });
 
-  await db.update(shipments).set({ reacted: true }).where(eq(shipments.id, shipmentId));
+  await getDb().update(shipments).set({ reacted: true }).where(eq(shipments.id, shipmentId));
   await closeTasks(shipmentId, ['contact', 'call']);
   await silence(shipmentId, { keepFinal: true });
 
@@ -152,10 +152,10 @@ export async function applyCustomerAction(shipmentId: string, action: CustomerAc
         shipmentId, type: 'address_fix', reason: 'customer_wants_redirect',
         label: 'Send new address to Correos',
       });
-      await db.update(shipments).set({ redirectPending: true }).where(eq(shipments.id, shipmentId));
+      await getDb().update(shipments).set({ redirectPending: true }).where(eq(shipments.id, shipmentId));
       break;
     case 'cant_go':
-      await db.update(shipments).set({ redirectPending: true }).where(eq(shipments.id, shipmentId));
+      await getDb().update(shipments).set({ redirectPending: true }).where(eq(shipments.id, shipmentId));
       await openTask({
         shipmentId, type: 'address_fix', reason: 'customer_cannot_collect',
         label: 'Send new address to Correos',
@@ -180,14 +180,14 @@ export async function applyCustomerAction(shipmentId: string, action: CustomerAc
 /** "Put back in stock". The parcel physically came back. */
 export async function restock(shipmentId: string, userId?: string): Promise<OutcomeResult> {
   const ctx = await context(shipmentId);
-  await db.update(shipments).set({ restockedAt: now() }).where(eq(shipments.id, shipmentId));
+  await getDb().update(shipments).set({ restockedAt: now() }).where(eq(shipments.id, shipmentId));
   await closeTasks(shipmentId, ['receive_return', 'address_fix', 'chase_carrier'], { outcome: 'Back in stock', userId });
   await say(`${ctx.name} — ${ctx.orderNumber} back in stock, closed itself`, shipmentId);
   return { toast: `${ctx.orderNumber} back in stock.` };
 }
 
 export async function undoRestock(shipmentId: string): Promise<void> {
-  await db.update(shipments).set({ restockedAt: null }).where(eq(shipments.id, shipmentId));
+  await getDb().update(shipments).set({ restockedAt: null }).where(eq(shipments.id, shipmentId));
   await openTask({
     shipmentId, type: 'receive_return', reason: 'returning', label: 'Put back in stock',
   });
@@ -199,9 +199,9 @@ export async function undoRestock(shipmentId: string): Promise<void> {
  */
 export async function sendRedirect(shipmentId: string, userId?: string): Promise<OutcomeResult> {
   const ctx = await context(shipmentId);
-  await db.update(shipments).set({ redirectPending: false }).where(eq(shipments.id, shipmentId));
+  await getDb().update(shipments).set({ redirectPending: false }).where(eq(shipments.id, shipmentId));
   await closeTasks(shipmentId, ['address_fix'], { outcome: 'New address sent to Correos', userId });
-  await db.insert(contactLog).values({
+  await getDb().insert(contactLog).values({
     shipmentId, at: now(), outcome: 'New address sent to Correos', note: '', userId: userId ?? null,
   });
   await say(`${ctx.name} — new address sent to Correos (they charge for this one)`, shipmentId);
@@ -211,7 +211,7 @@ export async function sendRedirect(shipmentId: string, userId?: string): Promise
 /** "Stop chasing this one". Writes off the parcel. Confirmed, and undoable. */
 export async function dropIt(shipmentId: string, userId?: string): Promise<OutcomeResult> {
   const ctx = await context(shipmentId);
-  await db.update(shipments).set({ droppedAt: now() }).where(eq(shipments.id, shipmentId));
+  await getDb().update(shipments).set({ droppedAt: now() }).where(eq(shipments.id, shipmentId));
   await silence(shipmentId, { keepFinal: false });
   await closeTasks(shipmentId, undefined, { outcome: 'Stopped chasing', userId });
   await say(`${ctx.name} — we stop chasing this one`, shipmentId);
@@ -219,14 +219,14 @@ export async function dropIt(shipmentId: string, userId?: string): Promise<Outco
 }
 
 export async function undoDrop(shipmentId: string): Promise<void> {
-  await db.update(shipments).set({ droppedAt: null }).where(eq(shipments.id, shipmentId));
+  await getDb().update(shipments).set({ droppedAt: null }).where(eq(shipments.id, shipmentId));
 }
 
 /** "Ask Correos about this one" / "Fix address with Correos". */
 export async function askCorreos(shipmentId: string, userId?: string): Promise<OutcomeResult> {
   const ctx = await context(shipmentId);
   await closeTasks(shipmentId, ['chase_carrier', 'address_fix'], { outcome: 'Asked Correos', userId });
-  await db.insert(contactLog).values({
+  await getDb().insert(contactLog).values({
     shipmentId, at: now(), outcome: 'Asked Correos', note: '', userId: userId ?? null,
   });
   await say(`${ctx.name} — asked Correos what happened to ${ctx.shippingCode}`, shipmentId);
@@ -237,7 +237,7 @@ export async function askCorreos(shipmentId: string, userId?: string): Promise<O
 export async function confirmAddress(shipmentId: string, userId?: string): Promise<OutcomeResult> {
   const ctx = await context(shipmentId);
   await closeTasks(shipmentId, ['insight', 'address_fix'], { outcome: 'Address confirmed', userId });
-  await db.insert(contactLog).values({
+  await getDb().insert(contactLog).values({
     shipmentId, at: now(), outcome: 'Address confirmed', note: '', userId: userId ?? null,
   });
   await say(`${ctx.name} — address confirmed before dispatch, one failed delivery avoided`, shipmentId);
@@ -257,7 +257,7 @@ interface Ctx {
 }
 
 async function context(shipmentId: string): Promise<Ctx> {
-  const [row] = await db.select({
+  const [row] = await getDb().select({
     name: orders.customerName,
     orderId: orders.id,
     orderNumber: orders.orderNumber,

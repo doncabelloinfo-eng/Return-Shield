@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { sql, db } from './index';
+import { getSql, getDb, closeDb } from './index';
 import { offices, orders, productRules, shipments, stores, users } from './schema';
 import { hashPassword } from '@/lib/auth/password';
 import { ingestEvent } from '@/lib/shipments/ingest';
@@ -119,7 +119,7 @@ async function main(): Promise<void> {
   const email = process.env.SEED_EMAIL ?? 'you@example.com';
   const password = process.env.SEED_PASSWORD ?? 'change-this-now';
 
-  await db.insert(users).values({
+  await getDb().insert(users).values({
     email: email.toLowerCase(),
     name: process.env.SEED_NAME ?? 'Operator',
     passwordHash: await hashPassword(password),
@@ -133,7 +133,7 @@ async function main(): Promise<void> {
   // The deposit window. Unconfirmed until somebody checks with Correos, and
   // the Settings screen says so out loud while that is true.
   for (const [productCode, depositDays] of [['PAQ ESTÁNDAR', 15], ['PAQ PREMIUM', 15], ['PAQ 48', 15]] as const) {
-    await db.insert(productRules).values({
+    await getDb().insert(productRules).values({
       productCode,
       depositDays,
       label: 'Working assumption — not yet confirmed with Correos',
@@ -143,18 +143,18 @@ async function main(): Promise<void> {
 
   if (!DEMO) {
     console.log('DEMO_MODE is not 1, so no sample parcels were created.');
-    await sql.end();
+    await closeDb();
     return;
   }
 
   for (const o of OFFICES) {
-    await db.insert(offices).values({ ...o, openingHours: 'L–V 08:30–20:30 · S 09:30–13:00' })
+    await getDb().insert(offices).values({ ...o, openingHours: 'L–V 08:30–20:30 · S 09:30–13:00' })
       .onConflictDoNothing();
   }
 
   const storeNames = [...new Set(PARCELS.map((p) => p.store))];
   for (const name of storeNames) {
-    await db.insert(stores).values({
+    await getDb().insert(stores).values({
       key: name.toLowerCase().replace(/[^a-z0-9]+/g, '-'),
       name,
       platform: name.startsWith('TikTok') ? 'tiktok' : 'shopify',
@@ -163,13 +163,13 @@ async function main(): Promise<void> {
   }
 
   const storeIds = new Map(
-    (await db.select({ id: stores.id, name: stores.name }).from(stores)).map((s) => [s.name, s.id]),
+    (await getDb().select({ id: stores.id, name: stores.name }).from(stores)).map((s) => [s.name, s.id]),
   );
 
   const now = Date.now();
 
   for (const p of PARCELS) {
-    const [order] = await db.insert(orders).values({
+    const [order] = await getDb().insert(orders).values({
       storeId: storeIds.get(p.store)!,
       externalOrderId: p.order,
       orderNumber: p.order,
@@ -188,7 +188,7 @@ async function main(): Promise<void> {
 
     if (!order) continue;
 
-    await db.insert(shipments).values({
+    await getDb().insert(shipments).values({
       orderId: order.id,
       shippingCode: p.track,
       productCode: p.product,
@@ -217,7 +217,7 @@ async function main(): Promise<void> {
   const fired = await runTick(await liveShipmentIds());
   console.log(`${PARCELS.length} parcels seeded · ${fired.rungsFired} escalation steps caught up`);
 
-  await sql.end();
+  await closeDb();
 }
 
 main().catch((err) => { console.error(err); process.exit(1); });

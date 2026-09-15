@@ -1,11 +1,13 @@
 import { NextResponse } from 'next/server';
-import { db } from '@/db';
+import { getDb } from '@/db';
 import { correosPushInbox } from '@/db/schema';
 import { now } from '@/lib/clock';
 
-export const runtime = 'nodejs';
+// Per-request, behind a login or a signed token, and it reads the database.
+// Saying so explicitly keeps it out of the build's static render pass, which
+// is what would otherwise make every build need a live production database.
 export const dynamic = 'force-dynamic';
-
+export const runtime = 'nodejs';
 /**
  * Correos' ShipmentTrack&TracePush calls this. We build it; they call it.
  *
@@ -80,7 +82,7 @@ export async function POST(req: Request): Promise<NextResponse> {
   }
 
   try {
-    await db.insert(correosPushInbox).values({
+    await getDb().insert(correosPushInbox).values({
       payload: payload as object,
       receivedAt: now(),
       sourceIp: sourceIp(req),

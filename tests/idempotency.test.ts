@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterAll } from 'vitest';
 import { eq } from 'drizzle-orm';
-import { db } from '@/db';
+import { getDb } from '@/db';
 import { eventReviewQueue, notifications, shipmentEvents, shipments, tasks } from '@/db/schema';
 import { TestClock, resetClock } from '@/lib/clock';
 import { ingestEvent } from '@/lib/shipments/ingest';
@@ -32,8 +32,8 @@ afterAll(async () => {
   await closeDb();
 });
 
-const events = (id: string) => db.select().from(shipmentEvents).where(eq(shipmentEvents.shipmentId, id));
-const msgs = (id: string) => db.select().from(notifications).where(eq(notifications.shipmentId, id));
+const events = (id: string) => getDb().select().from(shipmentEvents).where(eq(shipmentEvents.shipmentId, id));
+const msgs = (id: string) => getDb().select().from(notifications).where(eq(notifications.shipmentId, id));
 
 describe('the same event arriving twice changes nothing the second time', () => {
   it('stores one row and sends one message however many times it is replayed', async () => {
@@ -168,10 +168,10 @@ describe('an event Correos has never sent before', () => {
     // And it changed nothing.
     expect(rows[0].mappedState).toBeNull();
 
-    const [ship] = await db.select().from(shipments).where(eq(shipments.id, f.shipmentId));
+    const [ship] = await getDb().select().from(shipments).where(eq(shipments.id, f.shipmentId));
     expect(ship.state).toBe('created');
 
-    const review = await db.select().from(eventReviewQueue);
+    const review = await getDb().select().from(eventReviewQueue);
     expect(review).toHaveLength(1);
     expect(review[0].eventCode).toBe('E-9999');
   });
@@ -184,7 +184,7 @@ describe('an event Correos has never sent before', () => {
         occurredAt: new Date(clock.now().getTime() + i * 60_000), source: 'push', rawPayload: {},
       });
     }
-    const review = await db.select().from(eventReviewQueue);
+    const review = await getDb().select().from(eventReviewQueue);
     expect(review).toHaveLength(1);
     expect(review[0].timesSeen).toBe(3);
   });
@@ -199,7 +199,7 @@ describe('an event Correos has never sent before', () => {
     const { events: list } = normalisePayload(payload, 'push');
     for (const e of list) await ingestEvent(e);
 
-    const [ship] = await db.select().from(shipments).where(eq(shipments.id, f.shipmentId));
+    const [ship] = await getDb().select().from(shipments).where(eq(shipments.id, f.shipmentId));
     expect(ship.state).toBe('at_office');
     expect(ship.officeDeadline).not.toBeNull();
   });
@@ -223,7 +223,7 @@ describe('tasks do not pile up', () => {
     await openTask({ shipmentId: f.shipmentId, type: 'call', reason: 'a', label: 'Call them' });
     await openTask({ shipmentId: f.shipmentId, type: 'call', reason: 'b', label: 'Call them again' });
 
-    const rows = await db.select().from(tasks).where(eq(tasks.shipmentId, f.shipmentId));
+    const rows = await getDb().select().from(tasks).where(eq(tasks.shipmentId, f.shipmentId));
     expect(rows).toHaveLength(1);
     // The newest reason wins rather than sitting alongside the old one.
     expect(rows[0].label).toBe('Call them again');

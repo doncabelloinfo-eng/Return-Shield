@@ -6,8 +6,11 @@ import { RestockAll } from '@/components/RestockAll';
 import { SectionHeading, Empty } from '@/components/ui';
 import { money } from '@/lib/escalation/decide';
 
+// Per-request, behind a login or a signed token, and it reads the database.
+// Saying so explicitly keeps it out of the build's static render pass, which
+// is what would otherwise make every build need a live production database.
 export const dynamic = 'force-dynamic';
-
+export const runtime = 'nodejs';
 /**
  * Open it with your coffee.
  *

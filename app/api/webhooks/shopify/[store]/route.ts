@@ -2,9 +2,11 @@ import { NextResponse } from 'next/server';
 import { verifyShopifyHmac, storeEnv } from '@/lib/carriers/shopify/verify';
 import { ingestShopifyOrder, type ShopifyOrderPayload } from '@/lib/carriers/shopify/ingest';
 
-export const runtime = 'nodejs';
+// Per-request, behind a login or a signed token, and it reads the database.
+// Saying so explicitly keeps it out of the build's static render pass, which
+// is what would otherwise make every build need a live production database.
 export const dynamic = 'force-dynamic';
-
+export const runtime = 'nodejs';
 /**
  * Shopify `orders/fulfilled`, one route per store.
  *

@@ -1,5 +1,5 @@
 import { desc, eq } from 'drizzle-orm';
-import { db } from '@/db';
+import { getDb } from '@/db';
 import { notifications, orders, shipmentEvents, shipments, stores } from '@/db/schema';
 import { STATE_LABEL } from '@/lib/carriers/correos/state-map';
 import { fmt, exact } from '@/lib/time';
@@ -15,7 +15,7 @@ import { DockTabs } from './DockTabs';
  */
 export async function Dock() {
   const [messages, feed] = await Promise.all([
-    db.select({
+    getDb().select({
       id: notifications.id,
       body: notifications.body,
       linkLabel: notifications.linkLabel,
@@ -32,7 +32,7 @@ export async function Dock() {
       .orderBy(desc(notifications.createdAt))
       .limit(40),
 
-    db.select({
+    getDb().select({
       id: shipmentEvents.id,
       desc: shipmentEvents.eventDesc,
       mappedState: shipmentEvents.mappedState,

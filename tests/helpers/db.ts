@@ -1,4 +1,4 @@
-import { sql } from '@/db';
+import { getSql, closeDb as shutdownPool } from '@/db';
 
 /**
  * Refuses to truncate anything that is not obviously a test database.
@@ -27,7 +27,7 @@ function assertTestDatabase(): void {
  */
 export async function resetDb(): Promise<void> {
   assertTestDatabase();
-  await sql`
+  await getSql()`
     TRUNCATE
       shipment_actions, notifications, contact_log, tasks,
       escalation_extras, escalation_fires, shipment_events,
@@ -39,6 +39,7 @@ export async function resetDb(): Promise<void> {
   `;
 }
 
+/** Tests re-export this so each file can shut the pool down when it finishes. */
 export async function closeDb(): Promise<void> {
-  await sql.end({ timeout: 5 });
+  await shutdownPool();
 }

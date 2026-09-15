@@ -1,5 +1,5 @@
 import { and, eq, isNull } from 'drizzle-orm';
-import { db } from '@/db';
+import { getDb } from '@/db';
 import { notifications, offices, orders, shipments, stores } from '@/db/schema';
 import { verifyActionToken } from '@/lib/action-token';
 import { SAVED_STATES, type ShipmentState } from '@/lib/state-machine/states';
@@ -47,7 +47,7 @@ export async function resolveToken(token: string): Promise<
   const verified = verifyActionToken(token);
   if (!verified) return { ok: false, why: 'invalid' };
 
-  const [row] = await db.select({
+  const [row] = await getDb().select({
     notificationId: notifications.id,
     tokenExpiresAt: notifications.tokenExpiresAt,
     shipmentId: shipments.id,
@@ -97,7 +97,7 @@ export async function resolveToken(token: string): Promise<
 
 /** Opening the link is itself a signal: they read the message. */
 export async function markLinkOpened(notificationId: string): Promise<void> {
-  await db.update(notifications)
+  await getDb().update(notifications)
     .set({ linkOpenedAt: now() })
     .where(and(eq(notifications.id, notificationId), isNull(notifications.linkOpenedAt)));
 }

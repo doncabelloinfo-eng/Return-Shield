@@ -1,5 +1,5 @@
 import { and, desc, eq, gte, inArray, sql as raw } from 'drizzle-orm';
-import { db } from '@/db';
+import { getDb } from '@/db';
 import { contactLog, offices, orders, shipments, stores, tasks } from '@/db/schema';
 import type { ShipmentState } from '@/lib/state-machine/states';
 import {
@@ -61,7 +61,7 @@ export interface ShipmentRow extends DecidableShipment {
 export async function loadRows(opts: { at?: Date } = {}): Promise<ShipmentRow[]> {
   const at = opts.at ?? now();
 
-  const rows = await db.select({
+  const rows = await getDb().select({
     id: shipments.id,
     state: shipments.state,
     shippingCode: shipments.shippingCode,
@@ -96,7 +96,7 @@ export async function loadRows(opts: { at?: Date } = {}): Promise<ShipmentRow[]>
 
   const ids = rows.map((r) => r.id);
   const [taskRows, lastContacts] = await Promise.all([
-    db.select().from(tasks).where(and(inArray(tasks.shipmentId, ids), eq(tasks.status, 'open'))),
+    getDb().select().from(tasks).where(and(inArray(tasks.shipmentId, ids), eq(tasks.status, 'open'))),
     lastContactByShipment(ids),
   ]);
 
@@ -184,7 +184,7 @@ export async function loadRows(opts: { at?: Date } = {}): Promise<ShipmentRow[]>
 }
 
 async function lastContactByShipment(ids: readonly string[]) {
-  const rows = await db.select({
+  const rows = await getDb().select({
     shipmentId: contactLog.shipmentId,
     at: contactLog.at,
     outcome: contactLog.outcome,
@@ -268,7 +268,7 @@ async function countDoneToday(at: Date): Promise<number> {
   const midnight = madridMidnightUtc(p.year, p.month, p.day);
   // gte() rather than a raw fragment: drizzle then knows the column's type and
   // hands the driver a timestamp, instead of a bare Date it cannot serialise.
-  const [row] = await db.select({ n: raw<number>`count(*)::int` }).from(tasks)
+  const [row] = await getDb().select({ n: raw<number>`count(*)::int` }).from(tasks)
     .where(and(eq(tasks.status, 'done'), gte(tasks.closedAt, midnight)));
   return row?.n ?? 0;
 }

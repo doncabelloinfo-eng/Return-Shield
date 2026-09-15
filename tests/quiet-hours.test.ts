@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterAll } from 'vitest';
 import { and, eq } from 'drizzle-orm';
-import { db } from '@/db';
+import { getDb } from '@/db';
 import { activity, notifications, tasks } from '@/db/schema';
 import { TestClock, resetClock } from '@/lib/clock';
 import { ingestEvent } from '@/lib/shipments/ingest';
@@ -30,9 +30,9 @@ afterAll(async () => {
   await closeDb();
 });
 
-const msgs = (id: string) => db.select().from(notifications).where(eq(notifications.shipmentId, id));
+const msgs = (id: string) => getDb().select().from(notifications).where(eq(notifications.shipmentId, id));
 const openTasks = (id: string) =>
-  db.select().from(tasks).where(and(eq(tasks.shipmentId, id), eq(tasks.status, 'open')));
+  getDb().select().from(tasks).where(and(eq(tasks.shipmentId, id), eq(tasks.status, 'open')));
 
 describe('sending hours', () => {
   it('is nine in the morning to nine at night, Madrid time', () => {
@@ -126,7 +126,7 @@ describe('the last warning at two days left', () => {
       if (madridParts(clock.now()).hour < 9) await runShipment(f.shipmentId, clock.now());
     }
 
-    const lines = await db.select().from(activity);
+    const lines = await getDb().select().from(activity);
     const lastWarning = lines.filter((l) => l.text.includes('a call you cannot skip'));
     expect(lastWarning).toHaveLength(1);
   });

@@ -13,8 +13,11 @@ import { Tabs } from '@/components/Tabs';
 import { Dock } from '@/components/Dock';
 import { ToastHost } from '@/components/Toast';
 
+// Per-request, behind a login or a signed token, and it reads the database.
+// Saying so explicitly keeps it out of the build's static render pass, which
+// is what would otherwise make every build need a live production database.
 export const dynamic = 'force-dynamic';
-
+export const runtime = 'nodejs';
 export default async function PanelLayout({ children }: { children: React.ReactNode }) {
   const user = await requireUser();
   await loadDemoClock();

@@ -1,5 +1,5 @@
-import { and, desc, eq, gt, inArray, isNotNull, isNull, lt, ne, sql as raw } from 'drizzle-orm';
-import { db } from '@/db';
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, ne, notInArray, or, sql as raw } from 'drizzle-orm';
+import { getDb } from '@/db';
 import {
   correosPushInbox, jobRuns, offices, orders, postcodeStats,
   shipmentEvents, shipments, stores, importBatches, tasks,
@@ -48,18 +48,18 @@ export interface JobResult { detail: Record<string, unknown> }
 
 /** Wraps a job so every run is recorded, and a failure never kills the worker. */
 export async function runJob(job: JobName, fn: () => Promise<JobResult>): Promise<void> {
-  const [run] = await db.insert(jobRuns).values({ job, startedAt: now() })
+  const [run] = await getDb().insert(jobRuns).values({ job, startedAt: now() })
     .returning({ id: jobRuns.id });
 
   try {
     const { detail } = await fn();
-    await db.update(jobRuns)
+    await getDb().update(jobRuns)
       .set({ finishedAt: now(), ok: true, detail })
       .where(eq(jobRuns.id, run.id));
   } catch (err) {
     const message = err instanceof Error ? `${err.message}\n${err.stack ?? ''}` : String(err);
     console.error(`[job:${job}] failed:`, message);
-    await db.update(jobRuns)
+    await getDb().update(jobRuns)
       .set({ finishedAt: now(), ok: false, detail: { error: message } })
       .where(eq(jobRuns.id, run.id));
   }
@@ -83,7 +83,7 @@ export async function escalationTick(): Promise<JobResult> {
  * clear `processed_at` on the affected rows and they run again.
  */
 export async function drainPushInbox(limit = 200): Promise<JobResult> {
-  const rows = await db.select().from(correosPushInbox)
+  const rows = await getDb().select().from(correosPushInbox)
     .where(isNull(correosPushInbox.processedAt))
     .orderBy(correosPushInbox.receivedAt)
     .limit(limit);
@@ -100,7 +100,7 @@ export async function drainPushInbox(limit = 200): Promise<JobResult> {
         if (r.status === 'inserted') events += 1;
         if (r.status === 'unknown_shipment') unknown += 1;
       }
-      await db.update(correosPushInbox).set({
+      await getDb().update(correosPushInbox).set({
         processedAt: now(),
         attempts: row.attempts + 1,
         lastError: problems.length ? problems.join('; ') : null,
@@ -110,7 +110,7 @@ export async function drainPushInbox(limit = 200): Promise<JobResult> {
       const message = err instanceof Error ? err.message : String(err);
       // Left unprocessed so it is retried, unless it has failed too often —
       // at which point it stays in the table as evidence rather than looping.
-      await db.update(correosPushInbox).set({
+      await getDb().update(correosPushInbox).set({
         attempts: row.attempts + 1,
         lastError: message,
         processedAt: row.attempts >= 5 ? now() : null,
@@ -127,33 +127,84 @@ export async function drainPushInbox(limit = 200): Promise<JobResult> {
  * The safety net for push. Push has no guaranteed retry, so if the receiver
  * was down for an hour, this is the only thing that will ever notice.
  */
-export async function nightlyReconcile(): Promise<JobResult> {
+export interface ReconcileOptions {
+  /** Most parcels to look up in one run. */
+  batchSize?: number;
+  /** Stop starting new lookups after this long, so the run always finishes. */
+  budgetMs?: number;
+}
+
+export async function reconcile(opts: ReconcileOptions = {}): Promise<JobResult> {
   const client = trackpub();
   if (!client.configured) {
     return { detail: { skipped: 'Correos credentials are not configured' } };
   }
 
-  const ids = await liveShipmentIds();
-  const codes = ids.length
-    ? await db.select({ id: shipments.id, code: shipments.shippingCode })
-        .from(shipments).where(inArray(shipments.id, ids))
-    : [];
+  const batchSize = opts.batchSize ?? Number(process.env.RECONCILE_BATCH_SIZE ?? 200);
+  const budgetMs = opts.budgetMs ?? Number(process.env.RECONCILE_BUDGET_MS ?? 45_000);
+
+  // Two different clocks, deliberately. The budget measures how long this
+  // invocation has actually been running, so it must be wall-clock — a demo
+  // or a test that moves the clock forward a fortnight must not convince the
+  // sweep it has been going for a fortnight. The cursor comparison below is
+  // about the data, so it uses the injectable clock that wrote the stamps.
+  const elapsedFrom = Date.now();
+  const runStartedAt = now();
+
+  // Oldest-checked first. This ordering is the cursor: a run that stops early
+  // leaves the rest with an older stamp, so the next run continues from
+  // exactly where this one gave up. Nothing to persist separately, nothing to
+  // get out of step when parcels are added or finish, and no parcel can be
+  // starved because the one checked longest ago is always next.
+  const batch = await getDb().select({
+    id: shipments.id,
+    code: shipments.shippingCode,
+  })
+    .from(shipments)
+    .where(and(
+      isNull(shipments.droppedAt),
+      notInArray(shipments.state, ['delivered', 'collected', 'returned']),
+    ))
+    // NULLS FIRST is the point: Postgres sorts nulls last on an ascending
+    // order, which would put the parcels we have never checked at the very
+    // back of the queue — exactly backwards.
+    .orderBy(raw`${shipments.lastReconciledAt} ASC NULLS FIRST`, asc(shipments.createdAt))
+    .limit(batchSize);
 
   let checked = 0;
   let recovered = 0;
   let missing = 0;
+  let stoppedEarly: string | null = null;
   const failures: string[] = [];
 
-  for (const { code } of codes) {
+  for (const { id, code } of batch) {
+    // Check the budget before starting a lookup, never in the middle of one.
+    // Being killed mid-sweep is how a parcel gets marked checked without
+    // having been checked.
+    if (Date.now() - elapsedFrom > budgetMs) {
+      stoppedEarly = 'ran out of time — the next run continues from here';
+      break;
+    }
+
     const r = await client.lookup(code);
     checked += 1;
 
     if (!r.ok) {
-      if (r.status === 404) missing += 1;
-      else failures.push(`${code}: ${r.error}`);
-      // A rate limit or an outage means stop, not push harder. Tomorrow's
-      // sweep picks up whatever is left; a blocked account picks up nothing.
-      if (r.retryable && failures.length > 20) break;
+      if (r.status === 404) {
+        missing += 1;
+        // Correos has never heard of it. Asking again in two hours will not
+        // change that, so it still counts as checked.
+        await markReconciled(id);
+      } else {
+        failures.push(`${code}: ${r.error}`);
+      }
+
+      // A rate limit or an outage means stop, not push harder. The next run
+      // picks up where this one stopped; a blocked account picks up nothing.
+      if (r.retryable && failures.length >= 10) {
+        stoppedEarly = `Correos is refusing requests (${r.error})`;
+        break;
+      }
       continue;
     }
 
@@ -161,14 +212,47 @@ export async function nightlyReconcile(): Promise<JobResult> {
       const ingested = await ingestEvent(e);
       if (ingested.status === 'inserted') recovered += 1;
     }
+
+    await markReconciled(id);
   }
 
   if (recovered > 0) {
-    await say(`Nightly check with Correos found ${recovered} updates that never reached us`);
+    await say(`Check with Correos found ${recovered} updates that never reached us`);
   }
 
-  return { detail: { checked, recovered, missing, failures: failures.slice(0, 10) } };
+  const [remaining] = await getDb().select({ n: raw<number>`count(*)::int` })
+    .from(shipments)
+    .where(and(
+      isNull(shipments.droppedAt),
+      notInArray(shipments.state, ['delivered', 'collected', 'returned']),
+      or(
+        isNull(shipments.lastReconciledAt),
+        lt(shipments.lastReconciledAt, runStartedAt),
+      ),
+    ));
+
+  return {
+    detail: {
+      checked,
+      recovered,
+      missing,
+      queued: batch.length,
+      stillToCheck: remaining?.n ?? 0,
+      tookMs: Date.now() - elapsedFrom,
+      ...(stoppedEarly ? { stoppedEarly } : {}),
+      ...(failures.length ? { failures: failures.slice(0, 10) } : {}),
+    },
+  };
 }
+
+async function markReconciled(shipmentId: string): Promise<void> {
+  await getDb().update(shipments)
+    .set({ lastReconciledAt: now() })
+    .where(eq(shipments.id, shipmentId));
+}
+
+/** Kept under its old name so nothing that called it has to change. */
+export const nightlyReconcile = reconcile;
 
 /* ------------------------------------------------------------- 07:30 Madrid */
 
@@ -181,7 +265,7 @@ export async function staleDetector(): Promise<JobResult> {
   const { staleAfterHours } = await getSettings();
   const cutoff = new Date(now().getTime() - staleAfterHours * HOUR);
 
-  const rows = await db.select({
+  const rows = await getDb().select({
     id: shipments.id,
     customerName: orders.customerName,
     lastEventAt: shipments.lastEventAt,
@@ -273,7 +357,7 @@ export async function pushHeartbeat(): Promise<JobResult> {
   }
 
   const since = new Date(at.getTime() - 3 * HOUR);
-  const [row] = await db.select({ n: raw<number>`count(*)::int` })
+  const [row] = await getDb().select({ n: raw<number>`count(*)::int` })
     .from(shipmentEvents)
     .where(and(
       eq(shipmentEvents.source, 'push'),
@@ -314,7 +398,7 @@ export async function pushHeartbeat(): Promise<JobResult> {
  * fulfilments by API and inserts anything whose webhook never arrived.
  */
 export async function shopifyBackfill(): Promise<JobResult> {
-  const shopifyStores = await db.select().from(stores)
+  const shopifyStores = await getDb().select().from(stores)
     .where(and(eq(stores.platform, 'shopify'), eq(stores.active, true)));
 
   let created = 0;
@@ -360,7 +444,7 @@ export async function shopifyBackfill(): Promise<JobResult> {
 
 /** Nudges if it has been more than a day since the last TikTok upload. */
 export async function importReminder(): Promise<JobResult> {
-  const [last] = await db.select({ createdAt: importBatches.createdAt })
+  const [last] = await getDb().select({ createdAt: importBatches.createdAt })
     .from(importBatches)
     .where(isNotNull(importBatches.committedAt))
     .orderBy(desc(importBatches.createdAt))
@@ -402,7 +486,7 @@ export async function rebuildPostcodeStats(): Promise<JobResult> {
   const { watchFailRateMultiple } = await getSettings();
   const MIN_SHIPPED = 8;
 
-  const rows = await db.select({
+  const rows = await getDb().select({
     postalCode: orders.postalCode,
     town: orders.city,
     shipped: raw<number>`count(*)::int`,
@@ -441,7 +525,7 @@ export async function rebuildPostcodeStats(): Promise<JobResult> {
     const watch = v.shipped >= MIN_SHIPPED && average > 0 && failRate >= average * watchFailRateMultiple;
     if (watch) watched += 1;
 
-    await db.insert(postcodeStats).values({
+    await getDb().insert(postcodeStats).values({
       postalCode,
       town: v.town,
       shipped: v.shipped,
@@ -467,7 +551,7 @@ export async function housekeeping(): Promise<JobResult> {
 
   // Push payloads older than 90 days have served their purpose as evidence.
   const cutoff = new Date(now().getTime() - 90 * DAY);
-  const inbox = await db.delete(correosPushInbox)
+  const inbox = await getDb().delete(correosPushInbox)
     .where(and(isNotNull(correosPushInbox.processedAt), lt(correosPushInbox.receivedAt, cutoff)))
     .returning({ id: correosPushInbox.id });
 

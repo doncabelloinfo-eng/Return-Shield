@@ -1,5 +1,5 @@
 import { and, eq, sql as raw } from 'drizzle-orm';
-import { db } from '@/db';
+import { getDb } from '@/db';
 import {
   escalationFires, eventReviewQueue, offices, orders, shipmentEvents, shipments,
 } from '@/db/schema';
@@ -44,7 +44,7 @@ export interface IngestResult {
 }
 
 export async function ingestEvent(ev: IncomingEvent): Promise<IngestResult> {
-  const [ship] = await db.select({ id: shipments.id, state: shipments.state })
+  const [ship] = await getDb().select({ id: shipments.id, state: shipments.state })
     .from(shipments).where(eq(shipments.shippingCode, ev.shippingCode)).limit(1);
 
   if (!ship) {
@@ -59,7 +59,7 @@ export async function ingestEvent(ev: IncomingEvent): Promise<IngestResult> {
 
   if (ev.officeCode) await upsertOffice(ev);
 
-  const inserted = await db.insert(shipmentEvents).values({
+  const inserted = await getDb().insert(shipmentEvents).values({
     shipmentId: ship.id,
     rawPayload: ev.rawPayload as object,
     eventCode: ev.eventCode,
@@ -92,7 +92,7 @@ export async function ingestEvent(ev: IncomingEvent): Promise<IngestResult> {
  * do understand from being chased.
  */
 async function queueForReview(ev: IncomingEvent): Promise<void> {
-  await db.insert(eventReviewQueue).values({
+  await getDb().insert(eventReviewQueue).values({
     eventCode: ev.eventCode,
     eventDesc: ev.eventDesc,
     samplePayload: ev.rawPayload as object,
@@ -109,7 +109,7 @@ async function upsertOffice(ev: IncomingEvent): Promise<void> {
   // the name is fine for an office we have never seen, but it must never
   // overwrite a real name we already have — a customer sent to "OF-MAD-12"
   // instead of "Oficina Madrid Sucursal 12" cannot find the building.
-  await db.insert(offices).values({
+  await getDb().insert(offices).values({
     correosCode: ev.officeCode!,
     name: ev.officeName ?? ev.officeCode!,
     address: ev.officeAddress ?? '',
@@ -135,7 +135,7 @@ async function upsertOffice(ev: IncomingEvent): Promise<void> {
  * Correos rather than to the clock.
  */
 async function onStateEntered(shipmentId: string, from: ShipmentState, to: ShipmentState): Promise<void> {
-  const detail = await db.select({
+  const detail = await getDb().select({
     customerName: orders.customerName,
     valueCents: orders.totalValueCents,
     paymentMethod: orders.paymentMethod,
@@ -160,7 +160,7 @@ async function onStateEntered(shipmentId: string, from: ShipmentState, to: Shipm
 
   // Any update from Correos answers the "we have heard nothing" question.
   await closeTasks(shipmentId, ['chase_carrier']);
-  await db.delete(escalationFires).where(and(
+  await getDb().delete(escalationFires).where(and(
     eq(escalationFires.shipmentId, shipmentId),
     eq(escalationFires.rungId, 'stale'),
   ));
@@ -169,8 +169,8 @@ async function onStateEntered(shipmentId: string, from: ShipmentState, to: Shipm
     case 'failed': {
       // A fresh failure restarts the ladder: the four rungs below hang off
       // this failure, not the one a week ago.
-      await db.delete(escalationFires).where(eq(escalationFires.shipmentId, shipmentId));
-      await db.update(shipments)
+      await getDb().delete(escalationFires).where(eq(escalationFires.shipmentId, shipmentId));
+      await getDb().update(shipments)
         .set({ mutedUntil: null, snoozeReason: null, reacted: false, escalationStage: 'failed' })
         .where(eq(shipments.id, shipmentId));
       await say(`${name} — nobody home, reminders started`, shipmentId);
@@ -178,7 +178,7 @@ async function onStateEntered(shipmentId: string, from: ShipmentState, to: Shipm
     }
 
     case 'at_office': {
-      await db.update(shipments).set({ escalationStage: 'at_office' }).where(eq(shipments.id, shipmentId));
+      await getDb().update(shipments).set({ escalationStage: 'at_office' }).where(eq(shipments.id, shipmentId));
       const when = d.deadline ? `, last day ${shortDate(d.deadline)}` : '';
       await say(`${name} — now at ${office}${when}`, shipmentId);
       break;
@@ -187,7 +187,7 @@ async function onStateEntered(shipmentId: string, from: ShipmentState, to: Shipm
     case 'delivered': {
       await silence(shipmentId, { keepFinal: false });
       await closeTasks(shipmentId);
-      await db.update(shipments).set({ mutedUntil: null, snoozeReason: null, escalationStage: null })
+      await getDb().update(shipments).set({ mutedUntil: null, snoozeReason: null, escalationStage: null })
         .where(eq(shipments.id, shipmentId));
       await say(`${name} — delivered, closed itself`, shipmentId);
       break;
@@ -196,7 +196,7 @@ async function onStateEntered(shipmentId: string, from: ShipmentState, to: Shipm
     case 'collected': {
       await silence(shipmentId, { keepFinal: false });
       await closeTasks(shipmentId);
-      await db.update(shipments).set({ mutedUntil: null, snoozeReason: null, escalationStage: null })
+      await getDb().update(shipments).set({ mutedUntil: null, snoozeReason: null, escalationStage: null })
         .where(eq(shipments.id, shipmentId));
       await say(`${name} — picked it up, ${money(d.valueCents)} saved, closed itself`, shipmentId);
       break;
@@ -266,13 +266,13 @@ async function onStateEntered(shipmentId: string, from: ShipmentState, to: Shipm
 }
 
 async function markRepeatRisk(orderId: string): Promise<void> {
-  await db.update(orders).set({ repeatRisk: true }).where(eq(orders.id, orderId));
+  await getDb().update(orders).set({ repeatRisk: true }).where(eq(orders.id, orderId));
 }
 
 async function isWatchedArea(postalCode: string | null): Promise<boolean> {
   if (!postalCode) return false;
   const { postcodeStats } = await import('@/db/schema');
-  const [row] = await db.select({ watch: postcodeStats.watch }).from(postcodeStats)
+  const [row] = await getDb().select({ watch: postcodeStats.watch }).from(postcodeStats)
     .where(eq(postcodeStats.postalCode, postalCode)).limit(1);
   return row?.watch ?? false;
 }
@@ -283,7 +283,7 @@ async function isWatchedArea(postalCode: string | null): Promise<boolean> {
  */
 async function notifyReturnStarted(shipmentId: string): Promise<void> {
   const { sendInternalAlert } = await import('@/lib/mail/send');
-  const row = await db.select({
+  const row = await getDb().select({
     orderNumber: orders.orderNumber,
     customerName: orders.customerName,
     valueCents: orders.totalValueCents,

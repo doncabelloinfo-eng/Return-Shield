@@ -5,41 +5,45 @@ or a question I could not answer from the prototype and the brief.
 
 ---
 
-## 1. Hosting — needs deciding before Correos is booked
+## 1. Hosting — decided: Vercel Pro
 
-**The brief asked for this to be raised early rather than discovered at
-integration time. Here it is.**
+This was the open question in the first pass. It is now settled: the whole app
+runs on Vercel Pro, jobs included.
 
-Correos will give a fixed source IP to allowlist, and their push receiver needs
-to be a long-lived endpoint that always answers. That sits badly with
-serverless:
+**What that changed.** The always-on pg-boss worker cannot run there, so every
+job is now a route under `app/api/cron/` scheduled by `vercel.json`. The job
+functions themselves are untouched — they were already separate and idempotent,
+so it was wiring. `npm run worker` still exists for local work and demo mode.
 
-- IP filtering on Vercel is an Enterprise feature. On any other plan you cannot
-  restrict who can POST to the receiver, and the only thing standing between
-  the shipment table and the internet is the `clientID` / `clientSecret` pair
-  in the headers.
-- Cold starts are the other half. Correos has no guaranteed retry. An event
-  that arrives while a function is booting and times out is gone for good — the
-  nightly reconcile would eventually pick it up, but "eventually" is up to 24
-  hours of a countdown being wrong.
+**What is still worth knowing.** IP filtering is Enterprise-only, so on Pro the
+`clientID` / `clientSecret` pair is the only control on the Correos receiver.
+That is a real control, and the endpoint is the least dangerous one in the app —
+it authenticates, writes a row to a staging table, returns 200, and `push-drain`
+later ignores anything whose tracking code we do not recognise. Keep the
+credentials long and rotate them. If Correos ever insist on an allowlist, that
+one route moves to a small always-on host and nothing else does; it has no
+dependency on any other route.
 
-**The recommendation:** put the receiver on a small always-on host — Fly,
-Railway, a €5 VPS — and the dashboard wherever you like. The receiver is one
-route and does almost nothing: it authenticates, writes a row, and returns 200.
-It does not need to be near the database's read replica or anything else.
+The cold-start worry does not apply, because the receiver was already built to
+return 200 and process later. A cold start costs latency, not the event.
 
-The code is already arranged for this. `app/api/webhooks/correos/track` has no
-dependency on any other route, and everything downstream of it is the
-`push-drain` job, which can run anywhere.
+**Reconcile went from nightly to every two hours** at the same time. Correos
+does not retry a push, so that sweep is the only thing that ever repairs a
+dropped event — nightly meant a lost *"at office"* could leave a countdown up to
+a day wrong, on the one screen whose whole job is to be right about how many
+days are left. Two hours cuts that to two, and on Pro it costs nothing.
 
-If it does end up on Vercel, `CORREOS_PUSH_ALLOWED_IPS` still works when the
-platform passes `x-forwarded-for` honestly — but the credentials become the
-only real control, so rotate them and keep them long.
+### The build must never need a database
 
-**This needs an answer from you.** It changes the deployment shape, not the
-code.
+The first deploy failed on `Collecting page data` with `DATABASE_URL is not
+set`, because the client was built at module scope — importing a route module
+opened a connection.
 
----
+Setting the variable in Vercel would have made the error go away and left the
+problem: every build, every preview deployment and every CI run would need to
+reach the live production database. Now everything goes through `getDb()`,
+which builds the client on first call, and `DATABASE_URL= npm run build` is the
+check that it stays that way.
 
 ## 2. Where I departed from the prototype
 
@@ -128,6 +132,18 @@ otherwise a new town whose only two parcels both failed would cry wolf.
 **It will be empty for the first few weeks.** That is correct, and the Settings
 screen says so rather than showing a blank table.
 
+### A half-configured integration disables itself rather than throwing
+
+`messageProvider()` used to throw when `WHATSAPP_PROVIDER` was set but its
+credentials were not. On Vercel that is one mistyped variable away from taking
+the escalation engine down entirely.
+
+It now falls back to Step 1 with a warning: every message is still written at
+exactly the right moment and put in front of an operator. Wrong in a small way,
+where throwing was wrong in a large one. The same reasoning runs through
+`lib/integrations.ts` — a missing credential is a notice on the Settings screen
+saying what it costs, not a stack trace.
+
 ### The demo clock is behind DEMO_MODE
 
 The prototype's +1 hour / +1 day / Play / Start over controls only appear with
@@ -151,6 +167,12 @@ database so the dashboard and the worker agree about what time it is.
 
 ## 4. Still open
 
+- **`CRON_SECRET` must be set in production.** Every cron route refuses every
+  request without it. That is deliberate — an open endpoint that sweeps the
+  shipment table and emails the team is worse than a job that never runs — but
+  it does mean a deployment that forgets it has a dashboard and no engine, and
+  nothing on the dashboard will say so. The job-run rows in `job_runs` going
+  quiet is the symptom.
 - **The deposit window.** 15 days is unconfirmed. The Settings screen shows an
   amber banner until somebody ticks each service off, and every countdown is an
   estimate until then. It may also differ per service — the table is per

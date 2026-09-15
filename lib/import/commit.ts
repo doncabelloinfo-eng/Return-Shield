@@ -1,5 +1,5 @@
 import { and, eq, inArray } from 'drizzle-orm';
-import { db } from '@/db';
+import { getDb } from '@/db';
 import { importBatches, orders, shipments, stores } from '@/db/schema';
 import { now } from '@/lib/clock';
 import { say } from '@/lib/activity';
@@ -27,7 +27,7 @@ export async function commitImport(params: {
   /** Numbers a person typed into the preview, by row number. */
   fixes: Record<number, string>;
 }): Promise<CommitResult> {
-  const [store] = await db.select().from(stores).where(eq(stores.key, params.storeKey)).limit(1);
+  const [store] = await getDb().select().from(stores).where(eq(stores.key, params.storeKey)).limit(1);
   if (!store) throw new Error(`import: no store with key "${params.storeKey}"`);
 
   const at = now();
@@ -36,7 +36,7 @@ export async function commitImport(params: {
   let fixed = 0;
   const errors: { row: number; customer: string; problem: string }[] = [];
 
-  const [batch] = await db.insert(importBatches).values({
+  const [batch] = await getDb().insert(importBatches).values({
     storeId: store.id,
     filename: params.filename,
     uploadedBy: params.userId,
@@ -59,7 +59,7 @@ export async function commitImport(params: {
 
     if (row.phone.fixes.length || typed) fixed += 1;
 
-    const [order] = await db.insert(orders).values({
+    const [order] = await getDb().insert(orders).values({
       storeId: store.id,
       externalOrderId: row.orderId || row.shippingCode,
       orderNumber: row.orderId || row.shippingCode,
@@ -80,7 +80,7 @@ export async function commitImport(params: {
       set: { phoneE164: phone.e164, phoneStatus: phone.status, phoneRaw: phone.raw },
     }).returning({ id: orders.id });
 
-    const [ship] = await db.insert(shipments).values({
+    const [ship] = await getDb().insert(shipments).values({
       orderId: order.id,
       carrier: 'correos',
       shippingCode: row.shippingCode,
@@ -102,7 +102,7 @@ export async function commitImport(params: {
     }
   }
 
-  await db.update(importBatches).set({
+  await getDb().update(importBatches).set({
     rowsNew: created,
     rowsDuplicate: skipped,
     rowsError: errors.length,

@@ -1,11 +1,11 @@
 import 'dotenv/config';
 import {
   dailyDigest, drainPushInbox, escalationTick, housekeeping, importReminder,
-  nightlyReconcile, pushHeartbeat, rebuildPostcodeStats, runJob, shopifyBackfill,
+  pushHeartbeat, rebuildPostcodeStats, reconcile, runJob, shopifyBackfill,
   staleDetector, type JobName,
 } from './definitions';
 import { loadDemoClock } from '@/lib/demo-clock';
-import { sql } from '@/db';
+import { getSql, closeDb } from '@/db';
 
 /**
  * Run one job by hand: `npx tsx jobs/run-once.ts daily-digest`.
@@ -16,7 +16,7 @@ import { sql } from '@/db';
 const JOBS: Record<JobName, () => Promise<{ detail: Record<string, unknown> }>> = {
   'escalation-tick': escalationTick,
   'push-drain': () => drainPushInbox(),
-  'nightly-reconcile': nightlyReconcile,
+  'nightly-reconcile': () => reconcile(),
   'stale-detector': staleDetector,
   'daily-digest': dailyDigest,
   'push-heartbeat': pushHeartbeat,
@@ -35,7 +35,7 @@ async function main(): Promise<void> {
 
   await loadDemoClock();
   await runJob(name, JOBS[name]);
-  await sql.end();
+  await closeDb();
 }
 
 main().catch((err) => { console.error(err); process.exit(1); });

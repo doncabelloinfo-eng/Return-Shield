@@ -12,10 +12,10 @@ puts one button on it.
 
 ---
 
-## Running it
+## Running it locally
 
 ```bash
-cp .env.example .env          # fill in DATABASE_URL and SESSION_SECRET
+cp .env.example .env          # DATABASE_URL and SESSION_SECRET are enough to start
 npm install
 npm run db:migrate
 npm run db:seed               # creates your login; with DEMO_MODE=1, sample parcels too
@@ -26,9 +26,32 @@ npm run worker                # the jobs — a separate process, on purpose
 `npm run db:seed` reads `SEED_EMAIL` and `SEED_PASSWORD`. Afterwards, add
 people with `npx tsx scripts/create-user.ts ana@example.com "Ana Ruiz"`.
 
-**The worker is not optional.** Without it nothing escalates, nothing is
-reconciled with Correos, and the countdowns on the dashboard are the only thing
-still working.
+**Something has to run the jobs.** Locally that is `npm run worker`; in
+production it is Vercel Cron. Without either, nothing escalates, nothing is
+reconciled with Correos, and the countdowns are the only thing still working.
+
+Run a single job by hand at any time:
+
+```bash
+npm run job daily-digest
+```
+
+### Deploying
+
+See **[docs/deploying.md](docs/deploying.md)** for Vercel — environment
+variables, migrations, and the first-deploy order — and
+**[docs/cron.md](docs/cron.md)** for the schedule.
+
+The check to run before pushing:
+
+```bash
+DATABASE_URL= npm run build
+```
+
+With the variable deliberately empty, the build must still succeed. Nothing
+constructs a database client at module scope, so a build — including every
+preview deployment and every CI run — never needs a live database. If that
+command fails, something has started opening a connection at import time.
 
 ### Tests
 
@@ -39,7 +62,8 @@ npm run typecheck
 
 Tests never touch your development database: `tests/setup.ts` redirects them to
 `<database>_test`, and the truncate helper refuses to run against anything whose
-name does not end in `_test`.
+name does not end in `_test`. It also clears `DEMO_MODE` and every integration
+credential, so a run on your machine exercises the same thing as a run in CI.
 
 ---
 
@@ -62,8 +86,12 @@ lib/
   escalation/          the ladder, the decisions, the runner
   import/              phone normalisation, CSV/XLSX parsing, the commit
   clock.ts             now() — injectable, see "The time machine"
-jobs/                  every scheduled job, and the pg-boss worker
+  cron.ts              the wrapper that turns a job into an authenticated route
+  integrations.ts      what is connected and what each gap costs
+jobs/                  every scheduled job, and the local pg-boss worker
 db/                    schema, migrations, seed
+docs/                  deploying.md, cron.md
+vercel.json            the cron schedule
 ```
 
 ### Events are the source of truth
@@ -187,9 +215,15 @@ the URL exists.
 
 ### Correos trackpub — we call them
 
-`nightly-reconcile` sweeps every live shipment at 03:00. This is the safety net
-for push: if the receiver was down for an hour, nothing else will ever notice.
-The client backs off on 429s and 5xxs and stops rather than hammering.
+`reconcile` sweeps live shipments **every two hours**. This is the safety net
+for push: Correos does not retry, so if the receiver was down for an hour,
+nothing else will ever notice. Nightly would have meant a lost *"at office"*
+event leaving a countdown up to a day wrong.
+
+It is bounded — a batch cap and a time budget, both inside the route's
+`maxDuration` — and it resumes: `shipments.last_reconciled_at` is the cursor,
+and a run that stops early leaves the rest for the next one. The client backs
+off on 429s and 5xxs and gives up rather than hammering.
 
 ### Shopify
 
@@ -219,21 +253,32 @@ for the morning — the call task attached to the last warning does not.
 
 ## Scheduled jobs
 
-| Job | When | Does |
+| Job | When (Madrid) | Does |
 |---|---|---|
 | `escalation-tick` | every 30 min | fires whatever rung is due |
 | `push-drain` | every minute | turns staged Correos payloads into events |
-| `nightly-reconcile` | 03:00 | trackpub sweep — the safety net for push |
+| `reconcile` | every 2 hours | trackpub sweep — the safety net for push |
 | `stale-detector` | 07:30 | flags anything silent over the configured window |
 | `daily-digest` | 08:00 | emails what to do today, in order |
 | `push-heartbeat` | hourly | no events in working hours means it broke |
 | `shopify-backfill` | hourly | fulfilments whose webhook never arrived |
 | `import-reminder` | 09:00 | nudges if TikTok has not been uploaded |
-| `postcode-stats` | 02:45 | rebuilds the failure rates behind the warning |
-| `housekeeping` | 04:15 | expired sessions, old rate limits, old payloads |
+| `postcode-stats` | nightly | rebuilds the failure rates behind the warning |
+| `housekeeping` | nightly | expired sessions, old rate limits, old payloads |
 
-Every one is idempotent — assume it will run twice, because it will. Run one by
-hand with `npx tsx jobs/run-once.ts daily-digest`.
+In production each of these is a route under `app/api/cron/`, scheduled by
+`vercel.json` and authenticated with `CRON_SECRET` — every one returns 401
+without it. Locally the same functions run under `npm run worker`. The job code
+is identical either way; see [docs/cron.md](docs/cron.md) for the UTC-to-Madrid
+handling.
+
+Every one is idempotent — assume it will run twice, because it will.
+
+```bash
+npm run job daily-digest                # locally
+curl -H "Authorization: Bearer $CRON_SECRET" \
+  https://your-app.vercel.app/api/cron/reconcile
+```
 
 ---
 
@@ -254,7 +299,19 @@ to talk to.
 
 ---
 
+## When an integration is not set up
+
+The app runs with four variables: `DATABASE_URL`, `SESSION_SECRET`,
+`CRON_SECRET` and `APP_URL`. No Correos, no Shopify, no WhatsApp.
+
+A missing integration disables itself and says so on the Settings screen, in
+terms of what it costs — *"the two-hourly sweep does nothing, and it is the only
+thing that repairs an update Correos dropped"* — with the variables still to set
+underneath. The jobs that need one report that they skipped. Nothing crashes,
+because none of those credentials exist on day one and somebody still has to be
+able to log in and learn the screens.
+
 ## Before this goes live
 
-See [DECISIONS.md](DECISIONS.md). The hosting question in particular needs
-answering before the Correos integration is booked, not at integration time.
+See [DECISIONS.md](DECISIONS.md) for where this departs from the prototype and
+why, and [docs/deploying.md](docs/deploying.md) for the deployment itself.
