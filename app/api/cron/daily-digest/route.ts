@@ -5,4 +5,4 @@ export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 export const maxDuration = 60;
 
-export const GET = cronRoute('daily-digest', dailyDigest, { onlyAtMadridHour: 8 });
+export const GET = cronRoute('daily-digest', dailyDigest, { dailyAfterMadridHour: 8, maxDurationSeconds: 60 });

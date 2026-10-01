@@ -67,7 +67,7 @@ export async function Dock() {
         desc: e.desc,
         state: e.mappedState ? (STATE_LABEL[e.mappedState] ?? e.mappedState) : 'Not seen before',
         known: e.mappedState !== null,
-        source: e.source === 'poll' ? 'Nightly check' : 'Live from Correos',
+        source: e.source === 'poll' ? 'We asked Correos' : 'Live from Correos',
         when: `${fmt(e.occurredAt).date} ${fmt(e.occurredAt).time}`,
         exact: exact(e.occurredAt),
         who: `${e.customerName} · ${e.orderNumber}`,

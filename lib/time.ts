@@ -172,3 +172,26 @@ export function daysLeft(deadline: Date | null | undefined, from: Date = now()):
   if (!deadline) return null;
   return madridDaysBetween(from, deadline);
 }
+
+/**
+ * "4 minutes ago", "2 hours ago", "3 days ago".
+ *
+ * `human()` above answers a different question: it counts whole Madrid
+ * calendar days, which is right for a deadline ("goes back this Thursday") and
+ * useless for an outage — a 47-minute silence and a 47-second one both come
+ * back as "today". This one is for durations.
+ */
+export function agoInWords(at: Date, from: Date = now()): string {
+  const seconds = Math.round((from.getTime() - at.getTime()) / 1000);
+  if (seconds < 0) return 'just now';
+  if (seconds < 60) return 'less than a minute ago';
+
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? '' : 's'} ago`;
+
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? '' : 's'} ago`;
+
+  const days = Math.round(hours / 24);
+  return `${days} day${days === 1 ? '' : 's'} ago`;
+}

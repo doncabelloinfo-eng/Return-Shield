@@ -15,6 +15,27 @@
       "when": 1789502023520,
       "tag": "0001_polite_mockingbird",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1790862158790,
+      "tag": "0002_correos_locks_uniqueness",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1790863029943,
+      "tag": "0003_job_run_skipped",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1790863783673,
+      "tag": "0004_job_run_health_indexes",
+      "breakpoints": true
     }
   ]
 }

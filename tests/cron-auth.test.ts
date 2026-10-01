@@ -1,6 +1,10 @@
 import { describe, it, expect, beforeEach, afterAll } from 'vitest';
 import { readdirSync, readFileSync } from 'node:fs';
+import { eq } from 'drizzle-orm';
 import { authorised, cronRoute } from '@/lib/cron';
+import { acquireJobLock } from '@/lib/job-lock';
+import { getDb } from '@/db';
+import { jobRuns } from '@/db/schema';
 import { TestClock, resetClock } from '@/lib/clock';
 import { resetDb, closeDb } from './helpers/db';
 
@@ -158,10 +162,10 @@ describe('the schedule in vercel.json', () => {
     }
   });
 
-  it('fires the hour-sensitive jobs at both candidate UTC hours', () => {
-    // Madrid is UTC+1 or UTC+2 depending on the season. A single UTC hour would
-    // be right for half the year; two, with the job checking which is real, is
-    // right all of it.
+  it('offers the daily jobs an hourly chance, so a dropped tick costs an hour', () => {
+    // Vercel schedules in UTC and never retries. Pinning these to the one UTC
+    // hour that is 08:00 in Madrid means a single dropped invocation loses the
+    // day; hourly plus a "have I already run today" check loses an hour.
     const config = JSON.parse(readFileSync('vercel.json', 'utf8')) as {
       crons: { path: string; schedule: string }[];
     };
@@ -169,25 +173,49 @@ describe('the schedule in vercel.json', () => {
     for (const path of ['/api/cron/daily-digest', '/api/cron/stale-detector', '/api/cron/import-reminder']) {
       const cron = config.crons.find((c) => c.path === path);
       expect(cron, `${path} should be scheduled`).toBeDefined();
-      const hours = cron!.schedule.split(/\s+/)[1];
-      expect(hours, `${path} should fire at two hours`).toMatch(/^\d+,\d+$/);
+      expect(cron!.schedule, path).toBe('0 * * * *');
     }
+  });
+
+  it('keeps the daily jobs on minute 0, not staggered', () => {
+    // Staggering one to minute 20 to "avoid a collision" costs a daily delay
+    // rather than a shifted minute: the past-the-hour check first passes at the
+    // scheduled minute, so 09:00 would become 09:20 every single day. They are
+    // separate functions sharing nothing but Postgres.
+    const config = JSON.parse(readFileSync('vercel.json', 'utf8')) as {
+      crons: { path: string; schedule: string }[];
+    };
+    const daily = config.crons.filter((c) => c.schedule === '0 * * * *');
+    expect(daily).toHaveLength(3);
+  });
+
+  it('sweeps Correos every three hours', () => {
+    // 5,000 live parcels must each be refreshed at least every 12 hours. Every
+    // three, in batches of 100, is about 50 requests a run.
+    const config = JSON.parse(readFileSync('vercel.json', 'utf8')) as {
+      crons: { path: string; schedule: string }[];
+    };
+    expect(config.crons.find((c) => c.path === '/api/cron/reconcile')?.schedule).toBe('10 */3 * * *');
   });
 });
 
 
-describe('the Madrid-hour guard', () => {
+describe('the daily catch-up guard', () => {
   /**
-   * Vercel schedules in UTC and Madrid is UTC+1 or UTC+2 depending on the
-   * season, so the three jobs where the hour is the point fire at both
-   * candidate UTC hours and this decides which one is real.
+   * The three daily jobs used to fire at both candidate UTC hours and do
+   * nothing unless the Madrid hour matched exactly. That was correct and
+   * fragile: Vercel never retries, so one dropped invocation meant the digest
+   * never went out and nothing said so.
+   *
+   * Now they are scheduled hourly and ask two questions instead: is it past
+   * the hour in Madrid, and has a real run already happened today?
    */
   function routeAt(madridHour: number) {
     let ran = 0;
     const handler = cronRoute(
       'daily-digest',
       async () => { ran += 1; return { detail: { ok: true } }; },
-      { onlyAtMadridHour: madridHour },
+      { dailyAfterMadridHour: madridHour },
     );
     return { handler, ranCount: () => ran };
   }
@@ -198,8 +226,8 @@ describe('the Madrid-hour guard', () => {
 
   beforeEach(() => { process.env.CRON_SECRET = SECRET; });
 
-  it('does the work when it is the right hour in Madrid', async () => {
-    const clock = new TestClock('2026-09-01T08:15:00+02:00');
+  it('does the work once it is past the hour in Madrid', async () => {
+    const clock = new TestClock('2026-10-01T08:15:00+02:00');
     clock.install();
 
     const { handler, ranCount } = routeAt(8);
@@ -210,8 +238,8 @@ describe('the Madrid-hour guard', () => {
     resetClock();
   });
 
-  it('does nothing on the other half of the pair', async () => {
-    const clock = new TestClock('2026-09-01T07:15:00+02:00');
+  it('does nothing before the hour', async () => {
+    const clock = new TestClock('2026-10-01T07:15:00+02:00');
     clock.install();
 
     const { handler, ranCount } = routeAt(8);
@@ -219,43 +247,96 @@ describe('the Madrid-hour guard', () => {
 
     expect(res.status).toBe(200);
     expect(ranCount()).toBe(0);
-    expect((await res.json()).skipped).toMatch(/it is 7:00 in Madrid/);
+    expect((await res.json()).skipped).toBe('too early');
     resetClock();
   });
 
-  it('lands on the right hour in winter, when Madrid is UTC+1', async () => {
-    // 06:00 UTC is 07:00 in Madrid in winter and 08:00 in summer. The pair of
-    // schedules covers both; this is the winter one firing for stale-detector
-    // and not for the digest.
-    const clock = new TestClock('2026-12-01T06:30:00Z');
+  it('does it once a day, not once an hour', async () => {
+    const clock = new TestClock('2026-10-01T08:05:00+02:00');
     clock.install();
 
-    const digest = routeAt(8);
-    expect((await digest.handler(authed())).status).toBe(200);
-    expect(digest.ranCount()).toBe(0);
+    const { handler, ranCount } = routeAt(8);
+    await handler(authed());
 
-    const stale = routeAt(7);
-    await stale.handler(authed());
-    expect(stale.ranCount()).toBe(1);
+    // Every later invocation that day finds the work already done.
+    for (const hour of [9, 10, 14, 20, 23]) {
+      clock.set(`2026-10-01T${String(hour).padStart(2, '0')}:05:00+02:00`);
+      const res = await handler(authed());
+      expect((await res.json()).skipped).toBe('already done today');
+    }
+
+    expect(ranCount()).toBe(1);
     resetClock();
   });
 
-  it('lands on the right hour in summer, when Madrid is UTC+2', async () => {
-    const clock = new TestClock('2026-07-01T06:30:00Z');
+  it('runs again the next Madrid day', async () => {
+    const clock = new TestClock('2026-10-01T08:05:00+02:00');
     clock.install();
 
-    const digest = routeAt(8);
-    await digest.handler(authed());
-    expect(digest.ranCount()).toBe(1);
+    const { handler, ranCount } = routeAt(8);
+    await handler(authed());
+    clock.set('2026-10-02T08:05:00+02:00');
+    await handler(authed());
 
-    const stale = routeAt(7);
-    await stale.handler(authed());
-    expect(stale.ranCount()).toBe(0);
+    expect(ranCount()).toBe(2);
     resetClock();
   });
 
-  it('checks the secret before it checks the hour', async () => {
-    const clock = new TestClock('2026-09-01T08:15:00+02:00');
+  it('catches up later in the day when the scheduled hour was dropped', async () => {
+    // This is the whole point. Vercel missing the 08:00 tick used to mean no
+    // digest at all; now the 14:00 tick does it.
+    const clock = new TestClock('2026-10-01T14:00:00+02:00');
+    clock.install();
+
+    const { handler, ranCount } = routeAt(8);
+    await handler(authed());
+
+    expect(ranCount()).toBe(1);
+    resetClock();
+  });
+
+  it('does not count a failed run as done, so the next hour tries again', async () => {
+    const clock = new TestClock('2026-10-01T08:05:00+02:00');
+    clock.install();
+
+    let attempts = 0;
+    const handler = cronRoute('daily-digest', async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error('the mail server refused it');
+      return { detail: { ok: true } };
+    }, { dailyAfterMadridHour: 8 });
+
+    const first = await handler(authed());
+    expect(first.status).toBe(500);
+
+    clock.set('2026-10-01T09:05:00+02:00');
+    const second = await handler(authed());
+    expect(second.status).toBe(200);
+    expect(attempts).toBe(2);
+    resetClock();
+  });
+
+  it('does not count a skipped run as done either', async () => {
+    const clock = new TestClock('2026-10-01T08:05:00+02:00');
+    clock.install();
+
+    let real = 0;
+    const handler = cronRoute('daily-digest', async () => {
+      real += 1;
+      return { detail: { skipped: 'nothing to send' }, skipped: true };
+    }, { dailyAfterMadridHour: 8 });
+
+    await handler(authed());
+    clock.set('2026-10-01T09:05:00+02:00');
+    await handler(authed());
+
+    // A skip proves the scheduler is alive; it does not mean today is handled.
+    expect(real).toBe(2);
+    resetClock();
+  });
+
+  it('checks the secret before anything else', async () => {
+    const clock = new TestClock('2026-10-01T08:15:00+02:00');
     clock.install();
 
     const { handler, ranCount } = routeAt(8);
@@ -263,6 +344,84 @@ describe('the Madrid-hour guard', () => {
 
     expect(res.status).toBe(401);
     expect(ranCount()).toBe(0);
+    resetClock();
+  });
+});
+
+describe('the lock, through a route', () => {
+  const authed = (job: string) => new Request(`https://shield.example.com/api/cron/${job}`, {
+    headers: { authorization: `Bearer ${SECRET}` },
+  });
+
+  beforeEach(() => { process.env.CRON_SECRET = SECRET; });
+
+  it('lets one of two overlapping invocations do the work', async () => {
+    const clock = new TestClock('2026-10-01T10:00:00+02:00');
+    clock.install();
+
+    let running = 0;
+    let both = false;
+    const handler = cronRoute('escalation-tick', async () => {
+      running += 1;
+      if (running > 1) both = true;
+      await new Promise((r) => setTimeout(r, 60));
+      running -= 1;
+      return { detail: {} };
+    }, { maxDurationSeconds: 60 });
+
+    const [a, b] = await Promise.all([handler(authed('escalation-tick')), handler(authed('escalation-tick'))]);
+    const bodies = [await a.json(), await b.json()];
+
+    expect(both).toBe(false);
+    expect(bodies.filter((x) => x.skipped === 'locked')).toHaveLength(1);
+    resetClock();
+  });
+
+  it('records the skip, so a locked tick is not invisible', async () => {
+    const clock = new TestClock('2026-10-01T10:00:00+02:00');
+    clock.install();
+
+    await acquireJobLock('housekeeping', 120);
+    const handler = cronRoute('housekeeping', async () => ({ detail: {} }), { maxDurationSeconds: 60 });
+    await handler(authed('housekeeping'));
+
+    const rows = await getDb().select().from(jobRuns).where(eq(jobRuns.job, 'housekeeping'));
+    expect(rows).toHaveLength(1);
+    expect(rows[0].skipped).toBe(true);
+    expect(rows[0].ok).toBe(true);
+    expect(rows[0].detail).toMatchObject({ skipped: 'locked' });
+    resetClock();
+  });
+
+  it('frees the lock afterwards, so the next tick is not blocked', async () => {
+    const clock = new TestClock('2026-10-01T10:00:00+02:00');
+    clock.install();
+
+    let ran = 0;
+    const handler = cronRoute('postcode-stats', async () => { ran += 1; return { detail: {} }; }, {
+      maxDurationSeconds: 120,
+    });
+
+    await handler(authed('postcode-stats'));
+    await handler(authed('postcode-stats'));
+
+    expect(ran).toBe(2);
+    resetClock();
+  });
+
+  it('frees the lock even when the job throws', async () => {
+    const clock = new TestClock('2026-10-01T10:00:00+02:00');
+    clock.install();
+
+    const handler = cronRoute('stale-detector', async () => { throw new Error('boom'); }, {
+      maxDurationSeconds: 60,
+    });
+
+    const first = await handler(authed('stale-detector'));
+    expect(first.status).toBe(500);
+
+    // Still free: a job that throws must not wedge itself for the lease.
+    expect((await acquireJobLock('stale-detector', 60)).acquired).toBe(true);
     resetClock();
   });
 });

@@ -16,7 +16,7 @@ import { getSql, closeDb } from '@/db';
 const JOBS: Record<JobName, () => Promise<{ detail: Record<string, unknown> }>> = {
   'escalation-tick': escalationTick,
   'push-drain': () => drainPushInbox(),
-  'nightly-reconcile': () => reconcile(),
+  reconcile: () => reconcile(),
   'stale-detector': staleDetector,
   'daily-digest': dailyDigest,
   'push-heartbeat': pushHeartbeat,

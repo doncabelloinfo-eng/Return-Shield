@@ -29,17 +29,20 @@ const TZ = 'Europe/Madrid';
 const SCHEDULE: { name: JobName; cron: string; fn: () => Promise<{ detail: Record<string, unknown> }> }[] = [
   // Walks live shipments and fires whatever rung is due.
   { name: 'escalation-tick', cron: '*/30 * * * *', fn: escalationTick },
-  // Turns staged Correos payloads into events. Often, because the receiver
-  // only stages them — until this runs, a countdown has not started.
-  { name: 'push-drain', cron: '* * * * *', fn: () => drainPushInbox() },
+  // Turns staged Correos payloads into events — the receiver only stages them.
+  // Every five minutes, not every minute: push is not configured, so the
+  // staging table is always empty. Put it back to '* * * * *' when it is.
+  { name: 'push-drain', cron: '*/5 * * * *', fn: () => drainPushInbox() },
   // The safety net for push.
   // Locally this can afford to run as often as it does in production.
-  { name: 'nightly-reconcile', cron: '10 */2 * * *', fn: () => reconcile() },
-  { name: 'stale-detector', cron: '30 7 * * *', fn: staleDetector },
-  { name: 'daily-digest', cron: '0 8 * * *', fn: dailyDigest },
+  { name: 'reconcile', cron: '10 */3 * * *', fn: () => reconcile() },
+  // Hourly, like production. The jobs decide for themselves whether today's
+  // run has happened, so a missed tick costs an hour rather than a day.
+  { name: 'stale-detector', cron: '0 * * * *', fn: staleDetector },
+  { name: 'daily-digest', cron: '0 * * * *', fn: dailyDigest },
   { name: 'push-heartbeat', cron: '0 * * * *', fn: pushHeartbeat },
   { name: 'shopify-backfill', cron: '15 * * * *', fn: shopifyBackfill },
-  { name: 'import-reminder', cron: '0 9 * * *', fn: importReminder },
+  { name: 'import-reminder', cron: '0 * * * *', fn: importReminder },
   { name: 'postcode-stats', cron: '45 2 * * *', fn: rebuildPostcodeStats },
   { name: 'housekeeping', cron: '15 4 * * *', fn: housekeeping },
 ];

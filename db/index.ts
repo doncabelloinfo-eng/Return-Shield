@@ -1,6 +1,7 @@
 import { drizzle, type PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 import * as schema from './schema';
+import { connectionShape } from './connection';
 
 /**
  * The database client, built on first use and never at import time.
@@ -44,13 +45,21 @@ function connectionString(): string {
 export function getSql(): postgres.Sql {
   if (globalForDb.__rsClient) return globalForDb.__rsClient;
 
-  const client = postgres(connectionString(), {
+  const url = connectionString();
+  const shape = connectionShape(url);
+
+  const client = postgres(url, {
     // Serverless runs many short-lived instances against one database, so each
     // one holds a small pool and gives connections back quickly. A generous
     // pool per instance is how a Postgres runs out of connections at 9am.
     max: Number(process.env.DB_POOL_MAX ?? (process.env.VERCEL ? 3 : 10)),
     idle_timeout: 20,
     connect_timeout: 10,
+    // Supabase's transaction pooler multiplexes connections across backends,
+    // so a prepared statement named on one does not exist on the next. See
+    // db/connection.ts for why this is off everywhere rather than just there.
+    prepare: shape.prepare,
+    ssl: shape.ssl,
     onnotice: () => {},
   });
 
@@ -74,6 +83,19 @@ export function getDb(): Db {
  */
 export function isDatabaseConfigured(): boolean {
   return Boolean(process.env.DATABASE_URL);
+}
+
+/**
+ * Rows out of `db.execute()`.
+ *
+ * It returns either an array or an object with a `rows` property depending on
+ * driver internals, and drizzle's types promise neither. Everything that runs
+ * raw SQL needs this, so it lives here rather than being copied into each.
+ */
+export function rowsOf<T>(result: unknown): T[] {
+  if (Array.isArray(result)) return result as T[];
+  const rows = (result as { rows?: unknown }).rows;
+  return Array.isArray(rows) ? (rows as T[]) : [];
 }
 
 /** Shuts the pool down. Scripts and tests only; a request must never call it. */

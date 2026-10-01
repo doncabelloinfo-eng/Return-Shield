@@ -3,12 +3,14 @@ import { requireUser } from '@/lib/auth/guard';
 import { loadDemoClock, isDemoMode } from '@/lib/demo-clock';
 import { getSettings } from '@/lib/settings';
 import { recentActivity } from '@/lib/activity';
+import { engineHealth } from '@/lib/engine-health';
 import { actionable } from '@/lib/escalation/decide';
 import { loadRows } from '@/lib/views/rows';
 import { now } from '@/lib/clock';
 import { fmt } from '@/lib/time';
 import { TopBar } from '@/components/TopBar';
 import { Ticker } from '@/components/Ticker';
+import { EngineBanner } from '@/components/EngineBanner';
 import { Tabs } from '@/components/Tabs';
 import { Dock } from '@/components/Dock';
 import { ToastHost } from '@/components/Toast';
@@ -22,10 +24,14 @@ export default async function PanelLayout({ children }: { children: React.ReactN
   const user = await requireUser();
   await loadDemoClock();
 
-  const [settings, ticker, rows] = await Promise.all([
+  // engineHealth() has to come after loadDemoClock(): in demo mode job_runs
+  // rows are stamped from the offset clock, and reading one against the system
+  // clock would make a working engine look stopped.
+  const [settings, ticker, rows, health] = await Promise.all([
     getSettings(),
     recentActivity(24),
     loadRows(),
+    engineHealth(),
   ]);
 
   const at = now();
@@ -43,6 +49,7 @@ export default async function PanelLayout({ children }: { children: React.ReactN
           demo={isDemoMode()}
           userName={user.name}
         />
+        <EngineBanner health={health} />
         <Ticker items={ticker} />
 
         <div className="flex flex-col items-start lg:flex-row">

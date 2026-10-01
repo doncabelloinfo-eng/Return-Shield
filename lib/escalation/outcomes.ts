@@ -92,8 +92,12 @@ export async function logCall(
         label: 'Put back in stock when it lands',
       });
       await say(`${ctx.name} — doesn't want it, ${money(ctx.valueCents)} lost, ready to go back in stock`, shipmentId);
-      const { sendInternalAlert } = await import('@/lib/mail/send');
-      await sendInternalAlert({
+      const { raiseAlert } = await import('@/lib/alerts');
+      await raiseAlert({
+        // Keyed on the call, not just the parcel: an operator who rings again
+        // tomorrow and hears the same thing is telling us something new.
+        dedupeKey: `refused:${shipmentId}:${at.toISOString()}`,
+        shipmentId,
         subject: `Customer refused: ${ctx.orderNumber} · ${ctx.name} · ${money(ctx.valueCents)}`,
         lines: [
           `${ctx.name} told us on the phone they do not want ${ctx.orderNumber}.`,

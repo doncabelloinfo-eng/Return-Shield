@@ -5,4 +5,4 @@ export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 export const maxDuration = 60;
 
-export const GET = cronRoute('stale-detector', staleDetector, { onlyAtMadridHour: 7 });
+export const GET = cronRoute('stale-detector', staleDetector, { dailyAfterMadridHour: 7, maxDurationSeconds: 60 });

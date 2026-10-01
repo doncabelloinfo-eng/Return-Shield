@@ -9,7 +9,9 @@ export const maxDuration = 60;
  * Turns staged Correos payloads into events.
  *
  * The receiver returns 200 and writes the raw body; until this runs, a
- * countdown has not started. It is the one job where being a minute late is
- * visible, so it runs every minute.
+ * countdown has not started — so when push is in use, being late here is
+ * visible. Push is NOT in use at the moment (tracking runs on trackpub only),
+ * so it returns immediately and the schedule is every five minutes rather than
+ * every minute. Turn push on and this is the first number to put back.
  */
-export const GET = cronRoute('push-drain', () => drainPushInbox());
+export const GET = cronRoute('push-drain', () => drainPushInbox(), { maxDurationSeconds: 60 });

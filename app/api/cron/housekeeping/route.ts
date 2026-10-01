@@ -5,4 +5,4 @@ export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 export const maxDuration = 60;
 
-export const GET = cronRoute('housekeeping', housekeeping);
+export const GET = cronRoute('housekeeping', housekeeping, { maxDurationSeconds: 60 });

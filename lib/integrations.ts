@@ -28,7 +28,9 @@ export interface Integration {
 }
 
 export async function integrationStatus(): Promise<Integration[]> {
-  return [correosPush(), correosTrackpub(), await shopify(), whatsapp()];
+  const { getSetting } = await import('@/lib/settings');
+  const batchMode = await getSetting('correosBatchMode');
+  return [correosTrackpub(batchMode), correosPush(), await shopify(), whatsapp()];
 }
 
 function correosPush(): Integration {
@@ -38,11 +40,13 @@ function correosPush(): Integration {
   if (missing.length) {
     return {
       key: 'correos-push',
-      name: 'Correos live tracking',
+      name: 'Correos live push',
       status: 'missing',
-      detail: 'The receiver refuses every request until these are set, so no tracking '
-        + 'arrives by itself. Parcels added by hand or by Shopify still appear, but their '
-        + 'countdowns will not start until Correos can reach us.',
+      detail: 'Not in use, on purpose: tracking runs on the three-hourly sweep above. '
+        + 'The receiver refuses every request while these are unset, and the two jobs that '
+        + 'serve push return immediately rather than reporting on something nobody switched '
+        + 'on. Set these to get updates the moment Correos scans a parcel instead of within '
+        + 'three hours.',
       missingVars: missing,
     };
   }
@@ -61,27 +65,65 @@ function correosPush(): Integration {
   };
 }
 
-function correosTrackpub(): Integration {
-  const missing = ['CORREOS_CLIENT_ID', 'CORREOS_CLIENT_SECRET', 'CORREOS_JWT']
-    .filter((v) => !process.env[v]);
+function correosTrackpub(batchMode: string): Integration {
+  /**
+   * Four variables, from two different places, and it is easy to set two of
+   * them and think you are done:
+   *
+   *   CORREOS_CLIENT_ID / _SECRET        the API gateway credentials, from the
+   *                                      developer-portal app
+   *   CORREOS_OAUTH_CLIENT_ID / _SECRET  the CorreosID system-user application,
+   *                                      exchanged for the bearer token
+   *
+   * CORREOS_JWT is deliberately NOT in this list. It is a token pasted in by
+   * hand for testing; a thirty-minute credential is not something you configure
+   * a deployment with, and requiring it here used to tell a correctly
+   * configured deployment that its sweep did nothing.
+   */
+  const missing = [
+    'CORREOS_CLIENT_ID',
+    'CORREOS_CLIENT_SECRET',
+    'CORREOS_OAUTH_CLIENT_ID',
+    'CORREOS_OAUTH_CLIENT_SECRET',
+  ].filter((v) => !process.env[v]);
 
-  return missing.length
-    ? {
-        key: 'correos-trackpub',
-        name: 'Correos reconcile sweep',
-        status: 'missing',
-        detail: 'The two-hourly sweep does nothing. This is the only thing that repairs an '
-          + 'update Correos dropped — they do not retry — so until it is set, a lost event '
-          + 'means a countdown that is silently wrong.',
-        missingVars: missing,
-      }
-    : {
-        key: 'correos-trackpub',
-        name: 'Correos reconcile sweep',
-        status: 'ready',
-        detail: 'Sweeping every two hours, oldest-checked first.',
-        missingVars: [],
-      };
+  const manualToken = Boolean(process.env.CORREOS_JWT);
+
+  if (missing.length) {
+    // A hand-pasted token makes the sweep work without the OAuth pair, which is
+    // useful for a first test and is not a configuration to leave in place.
+    const workingAnyway = manualToken
+      && !missing.includes('CORREOS_CLIENT_ID')
+      && !missing.includes('CORREOS_CLIENT_SECRET');
+
+    return {
+      key: 'correos-trackpub',
+      name: 'Correos tracking',
+      status: workingAnyway ? 'partial' : 'missing',
+      detail: workingAnyway
+        ? 'Running on a token pasted in by hand, which expires in about half an hour and '
+          + 'cannot be renewed. Fine for a test; set the OAuth pair before relying on it.'
+        : 'The sweep does nothing, so no tracking reaches the system at all. Push is not '
+          + 'configured either, so this is the only source of events — until it is set, '
+          + 'every countdown on every screen is frozen at whatever it last knew.',
+      missingVars: missing,
+    };
+  }
+
+  const mode = batchMode === 'comma'
+    ? 'Asking about a hundred parcels per request.'
+    : batchMode === 'single'
+      ? 'Correos would not take a batch, so it is asking one parcel per request — slower, '
+        + 'and worth re-testing with the button above if that was a one-off.'
+      : 'It has not needed a batch yet, so the multi-parcel format is still untested.';
+
+  return {
+    key: 'correos-trackpub',
+    name: 'Correos tracking',
+    status: 'ready',
+    detail: `Sweeping every three hours, urgent parcels first. ${mode}`,
+    missingVars: [],
+  };
 }
 
 async function shopify(): Promise<Integration> {

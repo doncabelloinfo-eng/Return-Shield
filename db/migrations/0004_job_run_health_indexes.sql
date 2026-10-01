@@ -1,0 +1,2 @@
+CREATE INDEX "job_runs_started_idx" ON "job_runs" USING btree ("started_at");--> statement-breakpoint
+CREATE INDEX "job_runs_real_idx" ON "job_runs" USING btree ("job","started_at") WHERE ok IS TRUE AND skipped IS FALSE;

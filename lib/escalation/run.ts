@@ -72,6 +72,20 @@ export async function runTick(ids: readonly string[], at: Date = now()): Promise
 
 type FireOutcome = 'fired' | 'deferred';
 
+/**
+ * Fire one rung.
+ *
+ * Every branch claims the rung before doing anything, and does nothing at all
+ * if the claim fails. `markFired` returns whether THIS run was the one that
+ * recorded the firing; a concurrent run that lost gets `false` and stops.
+ *
+ * That claim is the first of two defences. The second is in the schema: the
+ * message, the task and the alert each have a unique key of their own, so even
+ * a side effect that slips past the claim — a state change that cleared the
+ * fires rows mid-flight, say — writes nothing the second time. One of the two
+ * would probably be enough; both is cheap, and the failure they prevent is a
+ * customer getting the same WhatsApp twice.
+ */
 async function fireRung(
   shipmentId: string, rung: DueRung, at: Date, result: TickResult,
 ): Promise<FireOutcome> {
@@ -89,13 +103,13 @@ async function fireRung(
       // A message due in the middle of the night waits until morning. The rung
       // is left unfired, so nothing is lost and nothing is sent at 04:00.
       if (!withinSendingHours(at)) return 'deferred';
-      await markFired(shipmentId, rung.id);
+      if (!await markFired(shipmentId, rung.id)) return 'fired';
       await deliverMessage(shipmentId, rung, ctx, result);
       break;
     }
 
     case 'call_task': {
-      await markFired(shipmentId, rung.id);
+      if (!await markFired(shipmentId, rung.id)) return 'fired';
       await openTask({
         shipmentId,
         type: 'call',
@@ -103,22 +117,24 @@ async function fireRung(
         label: rung.effect.label,
       });
       result.tasksOpened += 1;
-      await say(callTaskLine(rung, ctx), shipmentId);
+      await say(callTaskLine(rung, ctx), { shipmentId, dedupeKey: rungKey(shipmentId, rung) });
       break;
     }
 
     case 'chase_carrier': {
-      await markFired(shipmentId, rung.id);
+      if (!await markFired(shipmentId, rung.id)) return 'fired';
       await openTask({
         shipmentId, type: 'chase_carrier', reason: 'no_updates', label: rung.effect.label,
       });
       result.tasksOpened += 1;
-      await say(`${ctx.customerName} — ${rung.effect.label}`, shipmentId);
+      await say(`${ctx.customerName} — ${rung.effect.label}`, {
+        shipmentId, dedupeKey: rungKey(shipmentId, rung),
+      });
       break;
     }
 
     case 'expect_at_office': {
-      await markFired(shipmentId, rung.id);
+      if (!await markFired(shipmentId, rung.id)) return 'fired';
       // Correos normally has it at the counter two days after a failed
       // delivery. We do NOT invent the event — if they have not said so, the
       // parcel is unaccounted for and that is worth a person looking.
@@ -137,7 +153,7 @@ async function fireRung(
     }
 
     case 'deadline_reached': {
-      await markFired(shipmentId, rung.id);
+      if (!await markFired(shipmentId, rung.id)) return 'fired';
       await say(
         `${ctx.customerName} — time ran out at ${ctx.officeName ?? 'the post office'}, Correos should be sending it back`,
         shipmentId,
@@ -152,8 +168,13 @@ async function fireRung(
         label: 'The post office should have sent this back — confirm with Correos',
       });
       result.tasksOpened += 1;
-      const { sendInternalAlert } = await import('@/lib/mail/send');
-      await sendInternalAlert({
+      const { raiseAlert } = await import('@/lib/alerts');
+      await raiseAlert({
+        // Keyed on the parcel and the deadline it ran out of, so a re-run says
+        // nothing and a genuinely new deadline (the window was extended, the
+        // parcel went back to an office) is a new alert.
+        dedupeKey: `deadline-reached:${shipmentId}:${ctx.officeDeadline?.toISOString() ?? 'none'}`,
+        shipmentId,
         subject: `About to be returned: ${ctx.orderNumber} · ${ctx.customerName} · ${money(ctx.valueCents)}`,
         lines: [
           `${ctx.orderNumber} has run out of time at ${ctx.officeName ?? 'the post office'}.`,
@@ -194,6 +215,17 @@ async function bookLastWarningCall(
       shipmentId,
     );
   }
+}
+
+/**
+ * A stable name for one firing of one rung on one parcel.
+ *
+ * The due moment is part of it for the same reason it is part of the
+ * notification key: a parcel can legitimately fail delivery twice, and the
+ * second attempt's rungs are genuinely new events rather than repeats.
+ */
+function rungKey(shipmentId: string, rung: DueRung): string {
+  return `rung:${shipmentId}:${rung.id}:${rung.dueAt.toISOString()}`;
 }
 
 function callTaskLine(rung: DueRung, ctx: MessageContextRow): string {
@@ -251,8 +283,21 @@ async function deliverMessage(
     actionToken: token,
     // The link dies with the parcel or after thirty days, whichever is first.
     tokenExpiresAt: new Date(now().getTime() + 30 * DAY),
+    // Which firing produced this message. The due moment is part of the
+    // identity, not decoration: a parcel can legitimately fail delivery twice,
+    // and the first-contact message is then correctly due a second time.
+    rungId: rung.id,
+    rungDueAt: rung.dueAt,
     createdAt: now(),
+  }).onConflictDoNothing({
+    target: [notifications.shipmentId, notifications.rungId, notifications.rungDueAt],
   }).returning({ id: notifications.id });
+
+  // No row means another run wrote this exact message first. Stop here — and
+  // note that `row` is typed as present, because this project does not enable
+  // noUncheckedIndexedAccess, so without this guard the next line would read
+  // `.id` of undefined at three in the morning inside a cron route.
+  if (!row) return;
 
   result.messagesWritten += 1;
 

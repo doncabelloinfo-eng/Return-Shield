@@ -27,11 +27,17 @@ dependency on any other route.
 The cold-start worry does not apply, because the receiver was already built to
 return 200 and process later. A cold start costs latency, not the event.
 
-**Reconcile went from nightly to every two hours** at the same time. Correos
-does not retry a push, so that sweep is the only thing that ever repairs a
-dropped event — nightly meant a lost *"at office"* could leave a countdown up to
-a day wrong, on the one screen whose whole job is to be right about how many
-days are left. Two hours cuts that to two, and on Pro it costs nothing.
+**Reconcile went from nightly to every three hours** at the same time. Correos
+does not retry a push, and push is not configured at all, so that sweep is not
+a safety net — it is the only way an event ever arrives. Nightly meant a lost
+*"at office"* could leave a countdown up to a day wrong, on the one screen whose
+whole job is to be right about how many days are left.
+
+Three hours rather than two because the arithmetic changed: at ~1,000 new
+parcels a day about 5,000 are live, and batches of 100 codes make a full sweep
+roughly 50 requests. Every live parcel is seen on every run, so the interval is
+the staleness bound — three hours, against a 12-hour requirement, with room to
+tighten it if Correos' gateway turns out to tolerate less.
 
 ### The build must never need a database
 
@@ -45,7 +51,134 @@ reach the live production database. Now everything goes through `getDb()`,
 which builds the client on first call, and `DATABASE_URL= npm run build` is the
 check that it stays that way.
 
-## 2. Where I departed from the prototype
+## 2. Running on Supabase, and making a dropped job visible
+
+### Two connection strings, because the poolers are not interchangeable
+
+The app connects through Supabase's **transaction** pooler (6543) and
+migrations through the **session** pooler (5432). The transaction pooler
+multiplexes many short-lived serverless instances onto few backends, which is
+this workload's shape exactly, but it does not support prepared statements — so
+`prepare: false` everywhere, not just there, because a connection string can be
+changed without a deploy and a setting that only holds for Supabase is a
+setting that breaks when somebody changes the URL.
+
+A migration cannot use it at all: it takes an advisory lock and runs DDL, and
+through a transaction pooler the lock would be taken on one backend and the DDL
+run on another. Hence the second URL, and hence `db/migrate.ts` saying so in
+its own comments where somebody reaching for it will read them.
+
+TLS is on for anything that is not local. An explicit `?sslmode=` always wins,
+localhost and any database whose name ends in `_test` are exempt, everything
+else requires it. One function, `connectionShape()`, so the app and the
+migrator cannot drift apart on this.
+
+### Migrations run from GitHub Actions, manually
+
+Cloud sessions cannot reach Postgres ports, so somebody has to run migrations
+from somewhere that can. Actions can. `workflow_dispatch` only — a migration
+must never ride along with a deploy.
+
+**The repository is public, so those logs are public.** Nothing in the workflow
+prints a password, a connection string or an email address, the pre-flight
+checks name a missing secret without echoing any value, and
+`scripts/create-user.ts` is deliberately not used there: it prints a generated
+password to stdout, which is right at a terminal and wrong in a public log. For
+the same reason `db/migrate.ts` logs only the shape of the connection, and on
+failure prints `err.message` rather than the error — a postgres.js connection
+error carries the full options, password included.
+
+`db:seed` is re-runnable: an existing user's password is never touched, and
+there is no default password at all, so a seeded instance cannot be reachable
+with a credential written down in this repository.
+
+### A lease in a table, not an advisory lock
+
+Vercel Cron is best-effort: no retries, occasional duplicate fires, overlapping
+runs. The lock is a `job_locks` row with a `locked_until` lease, taken with a
+single conditional insert-or-update that returns a row only to the winner.
+Session advisory locks were the obvious answer and are the wrong one here, for
+the pooler reason above.
+
+A held lock returns **200** with `{ skipped: 'locked' }`. A 500 would make the
+lock itself look like an outage, and the operator would learn to ignore the one
+signal that is supposed to mean something.
+
+The lock is the first line of defence and not the only one. Every message, task
+and alert is unique in the database, so two concurrent ticks cannot double-send
+even with the lock bypassed — which is how the concurrency test runs them,
+deliberately.
+
+**There is a crash window, and it is the honest trade.** A rung is claimed by
+`markFired` before its side effect, so an instance killed between the two
+leaves the rung marked fired and the message unsent. The alternative — send
+first, record after — turns the same crash into a customer receiving the same
+WhatsApp twice, possibly repeatedly. One missed message that the daily digest
+and the parcel page both still show is recoverable by a human. A loop of
+duplicates at a customer is not.
+
+### Daily jobs catch up rather than firing at both candidate hours
+
+The three daily jobs used to be scheduled at both UTC hours that could be the
+right Madrid hour, doing nothing unless the Madrid hour matched. Correct and
+fragile: Vercel never retries, so one dropped invocation meant the digest never
+went out that day and nothing said so. They are now hourly with two questions —
+past the hour in Madrid, and not already done today — so a dropped invocation
+costs an hour.
+
+"Already done" counts only a run with `ok` exactly true and `skipped` false,
+within a Madrid day bounded at both ends. Each of those three conditions is a
+bug that was available: `ok` null is an instance killed mid-run, a skip is a
+run that correctly did nothing, and demo mode leaves `job_runs` rows dated in
+the future which an open-ended `>= midnight` would read as "today is done".
+
+### The engine's own failure had to become visible
+
+A wrong `CRON_SECRET` makes every cron route answer 401 while the dashboard
+carries on rendering countdowns that nothing is counting down. Parcels go back
+and no screen says why. It is the one failure in this system that is invisible
+by construction, so something had to go looking for it: no successful run in 45
+minutes puts a banner on every panel screen, it is not dismissible, and it
+names the two things that actually cause it.
+
+It distinguishes "nothing has ever run" from "stopped at *time*", because those
+have different causes and only one of them is a new deployment. A **skipped**
+run counts as a heartbeat — it proves Vercel fired the route, the secret
+matched, the database was writable and the job reached its end, which is
+exactly what a 401 or a deleted schedule would deny us. A **failed** run does
+not count: a job throwing every half hour proves the scheduler is alive and is
+not something to be quiet about.
+
+In demo mode the banner says nothing at all. Demo mode exists to jump the
+clock, and "+1 day" moves `now()` forward with nothing running in between.
+
+### The Correos token, and a batch format nobody documented
+
+The developer portal does not say where the JWT comes from. Two open-source
+SDKs independently do the same thing, so that is what this does — OAuth
+client-credentials against CorreosID, `idToken` with `access_token` as a
+fallback, cached until `exp` minus a minute, 25 minutes assumed if there is no
+`exp`. It is the best evidence available, not documentation, so the response
+field is configurable and a hand-pasted `CORREOS_JWT` still works for testing.
+Nothing logs the token, at any level, ever.
+
+The multi-parcel format is genuinely undocumented: the manual says 100 codes a
+request and does not say how to write them. So the client tries
+comma-separated, then **checks the answer actually covers the codes it asked
+about**, and falls back to one request per code if it does not. That coverage
+check is the part that matters: without it a response that quietly ignored half
+the codes would stamp those parcels as freshly checked, and their countdowns
+would go stale with nothing on any screen to say so.
+
+The verdict is sticky, and that cuts both ways: it saves 5,000 requests a run
+when batching works, and it would cost 5,000 when a single odd answer
+downgraded it wrongly. So a zero-coverage answer only downgrades a format that
+has never been **proven**, and there is a lever on the Settings screen to make
+it probe again.
+
+---
+
+## 3. Where I departed from the prototype
 
 The prototype is the specification, and I ported it. These are the places I did
 not, and why. Each one is a small revert if you disagree.
@@ -152,7 +285,7 @@ database so the dashboard and the worker agree about what time it is.
 
 ---
 
-## 3. Things I chose, where the brief left it open
+## 4. Things I chose, where the brief left it open
 
 | | Chose | Why |
 |---|---|---|
@@ -165,14 +298,17 @@ database so the dashboard and the worker agree about what time it is.
 
 ---
 
-## 4. Still open
+## 5. Still open
 
 - **`CRON_SECRET` must be set in production.** Every cron route refuses every
   request without it. That is deliberate — an open endpoint that sweeps the
   shipment table and emails the team is worse than a job that never runs — but
-  it does mean a deployment that forgets it has a dashboard and no engine, and
-  nothing on the dashboard will say so. The job-run rows in `job_runs` going
-  quiet is the symptom.
+  it does mean a deployment that forgets it has a dashboard and no engine.
+  **This is now visible**: no successful run in 45 minutes puts an undismissable
+  banner on every panel screen, and Settings → Connections shows when each job
+  was last heard from. What is still open is that nobody is *told* — there is no
+  push, no SMS, nothing that reaches somebody who is not looking at the screen.
+  If the business depends on this, that is the next thing to add.
 - **The deposit window.** 15 days is unconfirmed. The Settings screen shows an
   amber banner until somebody ticks each service off, and every countdown is an
   estimate until then. It may also differ per service — the table is per
@@ -196,7 +332,7 @@ database so the dashboard and the worker agree about what time it is.
 
 ---
 
-## 5. What I would do next
+## 6. What I would do next
 
 1. **Point it at the Correos mock.** `CORREOS_TRACKPUB_BASE_URL` already
    exists; the push receiver can be pointed at from their Postman collection.

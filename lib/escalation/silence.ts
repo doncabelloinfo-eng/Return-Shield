@@ -35,15 +35,31 @@ export async function silence(
   }
 }
 
-/** This rung has now happened and must never happen again. */
-export async function markFired(shipmentId: string, rungId: string): Promise<void> {
-  await getDb().insert(escalationFires)
+/**
+ * Claim a rung: record that it has fired, and say whether THIS caller was the
+ * one that recorded it.
+ *
+ * The return value is the whole point and it used to be absent. Two concurrent
+ * ticks both read "not yet fired", both called this, and both went on to do the
+ * side effect — the insert's conflict was discarded, so the loser had no way to
+ * know it had lost. The composite primary key on (shipment_id, rung_id) was
+ * already there; nothing was reading its answer.
+ *
+ * `true` means: you claimed it, do the work. `false` means: somebody else is
+ * already doing it, do nothing at all.
+ */
+export async function markFired(shipmentId: string, rungId: string): Promise<boolean> {
+  const claimed = await getDb().insert(escalationFires)
     .values({ shipmentId, rungId, firedAt: now() })
-    .onConflictDoNothing();
+    .onConflictDoNothing()
+    .returning({ rungId: escalationFires.rungId });
+
   await getDb().delete(escalationExtras).where(and(
     eq(escalationExtras.shipmentId, shipmentId),
     eq(escalationExtras.rungId, rungId),
   ));
+
+  return claimed.length > 0;
 }
 
 /** Book a follow-up for the engine itself. */
@@ -60,9 +76,16 @@ export async function scheduleExtra(
   ));
 
   const rungId = `${kind}-${dueAt.getTime()}`;
+  // Upsert on (shipment_id, kind) rather than insert-or-nothing. The rung id
+  // embeds the due time, so two runs a millisecond apart produce two different
+  // ids and the (shipment, rung) index sees no conflict — the invariant this
+  // function's own comment states was not actually enforced by anything.
   await getDb().insert(escalationExtras)
     .values({ shipmentId, rungId, kind, dueAt, createdAt: now() })
-    .onConflictDoNothing();
+    .onConflictDoUpdate({
+      target: [escalationExtras.shipmentId, escalationExtras.kind],
+      set: { rungId, dueAt },
+    });
 
   // If this exact rung fired before, let it fire again — it is a new booking.
   await getDb().delete(escalationFires).where(and(

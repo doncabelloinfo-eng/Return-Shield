@@ -15,7 +15,7 @@ import { silence } from '@/lib/escalation/silence';
 import { reproject } from './repo';
 
 /**
- * One event in. Push and the nightly poll both come through here.
+ * One event in. Push and the reconcile sweep both come through here.
  *
  * Writing the same event twice is not an error and is not a special case — the
  * UNIQUE(shipment_id, event_code, occurred_at) constraint makes the second
@@ -282,7 +282,7 @@ async function isWatchedArea(postalCode: string | null): Promise<boolean> {
  * they would otherwise have to go and look up.
  */
 async function notifyReturnStarted(shipmentId: string): Promise<void> {
-  const { sendInternalAlert } = await import('@/lib/mail/send');
+  const { raiseAlert } = await import('@/lib/alerts');
   const row = await getDb().select({
     orderNumber: orders.orderNumber,
     customerName: orders.customerName,
@@ -305,7 +305,12 @@ async function notifyReturnStarted(shipmentId: string): Promise<void> {
     ? 'the customer refused it at the door'
     : `nobody collected it from ${d.officeName ?? 'the post office'} in time`;
 
-  await sendInternalAlert({
+  await raiseAlert({
+    // One alert per parcel per return. A parcel only comes back once; if it
+    // somehow re-enters `returning` after being received, that is the same
+    // event being re-reported rather than a second return.
+    dedupeKey: `return-started:${shipmentId}`,
+    shipmentId,
     subject: `Coming back: ${d.orderNumber} · ${d.customerName} · ${money(d.valueCents)}`,
     lines: [
       `Order ${d.orderNumber} is on its way back to us because ${why}.`,

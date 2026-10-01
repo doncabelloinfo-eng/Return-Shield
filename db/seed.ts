@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { eq } from 'drizzle-orm';
 import { getSql, getDb, closeDb } from './index';
 import { offices, orders, productRules, shipments, stores, users } from './schema';
 import { hashPassword } from '@/lib/auth/password';
@@ -7,6 +8,7 @@ import { runTick } from '@/lib/escalation/run';
 import { liveShipmentIds } from '@/lib/shipments/repo';
 import { setSetting } from '@/lib/settings';
 import { DAY, HOUR } from '@/lib/clock';
+import { madridMidnightUtc, madridParts } from '@/lib/time';
 
 /**
  * Seeds an account and, with DEMO_MODE=1, a realistic set of parcels part-way
@@ -115,23 +117,65 @@ const PARCELS: SeedParcel[] = [
     script: delivered(1) },
 ];
 
-async function main(): Promise<void> {
-  const email = process.env.SEED_EMAIL ?? 'you@example.com';
-  const password = process.env.SEED_PASSWORD ?? 'change-this-now';
+/**
+ * The first login.
+ *
+ * Safe to run again, and that is the whole design: this runs from a GitHub
+ * Actions workflow on a PUBLIC repository, so it must never print a secret,
+ * and it must never change an existing user's password. Somebody re-running
+ * the migration workflow with the seed box ticked should not lock the team out
+ * or silently reset a password they have since changed.
+ *
+ * There is also no default password any more. A password baked into a public
+ * repository is not a convenience, it is a credential — if SEED_PASSWORD is
+ * needed and missing, this fails and says so.
+ */
+async function seedUser(): Promise<void> {
+  const email = (process.env.SEED_EMAIL ?? '').trim().toLowerCase();
+  if (!email) {
+    throw new Error('SEED_EMAIL is not set. Set SEED_EMAIL, SEED_PASSWORD and SEED_NAME.');
+  }
+
+  const [existing] = await getDb().select({ id: users.id }).from(users)
+    .where(eq(users.email, email)).limit(1);
+
+  if (existing) {
+    // Nothing to do, and nothing that could go wrong. Their password stays
+    // exactly as it is — including if they have changed it since.
+    console.log('user: already present, left untouched');
+    return;
+  }
+
+  const password = process.env.SEED_PASSWORD ?? '';
+  if (!password) {
+    throw new Error(
+      'SEED_PASSWORD is not set and the user does not exist yet, so there is no password '
+      + 'to create them with. Set SEED_PASSWORD (there is deliberately no default).',
+    );
+  }
+  if (password.length < 12) {
+    throw new Error('SEED_PASSWORD is shorter than 12 characters. Use something longer.');
+  }
 
   await getDb().insert(users).values({
-    email: email.toLowerCase(),
+    email,
     name: process.env.SEED_NAME ?? 'Operator',
     passwordHash: await hashPassword(password),
   }).onConflictDoNothing();
 
-  console.log(`user: ${email}`);
-  if (password === 'change-this-now') {
-    console.log('  ⚠ the default password is in the repository. Change it before this is reachable.');
-  }
+  // Never the address and never the password: these logs are public.
+  console.log('user: created');
+}
+
+async function main(): Promise<void> {
+  await seedUser();
 
   // The deposit window. Unconfirmed until somebody checks with Correos, and
   // the Settings screen says so out loud while that is true.
+  //
+  // product_code is the primary key, so onConflictDoNothing makes a re-run a
+  // no-op — and crucially it does NOT reset a number the operator has since
+  // changed on the Settings screen back to the working assumption.
   for (const [productCode, depositDays] of [['PAQ ESTÁNDAR', 15], ['PAQ PREMIUM', 15], ['PAQ 48', 15]] as const) {
     await getDb().insert(productRules).values({
       productCode,
@@ -196,8 +240,12 @@ async function main(): Promise<void> {
     }).onConflictDoNothing();
 
     for (const [daysAgo, hour, desc] of p.script) {
-      const at = new Date(now - daysAgo * DAY);
-      at.setHours(hour, 0, 0, 0);
+      // Madrid wall-clock, explicitly. `setHours` would mean the process
+      // timezone — so seeded parcels landed at different hours on a developer's
+      // machine than in CI, which is the one timezone violation outside
+      // lib/time.ts and the reason the suite now runs in UTC.
+      const day = madridParts(new Date(now - daysAgo * DAY));
+      const at = new Date(madridMidnightUtc(day.year, day.month, day.day).getTime() + hour * HOUR);
       await ingestEvent({
         shippingCode: p.track,
         eventCode: `SEED-${desc.slice(0, 16)}`,

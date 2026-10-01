@@ -58,6 +58,14 @@ export interface NormaliseOutcome {
   events: IncomingEvent[];
   /** Things we could not read. Kept so a human can look at them. */
   problems: string[];
+  /**
+   * Every tracking code the payload talked about, whether or not it had any
+   * events. This is what tells a batch lookup which of the codes it asked
+   * about were actually answered — a parcel with no events yet is a different
+   * thing from a parcel the response left out, and conflating them would stamp
+   * parcels as checked that nobody checked.
+   */
+  codesSeen: string[];
 }
 
 export function normalisePayload(
@@ -66,16 +74,22 @@ export function normalisePayload(
 ): NormaliseOutcome {
   const parsed = PayloadSchema.safeParse(payload);
   if (!parsed.success) {
-    return { events: [], problems: ['payload did not look like a Correos tracking body'] };
+    return {
+      events: [],
+      problems: ['payload did not look like a Correos tracking body'],
+      codesSeen: [],
+    };
   }
 
   const shipments = collectShipments(parsed.data);
   const events: IncomingEvent[] = [];
   const problems: string[] = [];
+  const codesSeen = new Set<string>();
 
   for (const s of shipments) {
     const shippingCode = firstString(s.codEnvio, s.codigoEnvio, s.shippingCode)?.trim().toUpperCase();
     if (!shippingCode) { problems.push('a shipment with no tracking code'); continue; }
+    codesSeen.add(shippingCode);
 
     const list = s.eventos ?? s.events ?? [];
     if (!list.length) problems.push(`${shippingCode}: no events in the payload`);
@@ -110,7 +124,7 @@ export function normalisePayload(
     }
   }
 
-  return { events, problems };
+  return { events, problems, codesSeen: [...codesSeen] };
 }
 
 /** Does this payload contain anything we have never seen a mapping for? */

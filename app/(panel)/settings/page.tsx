@@ -3,7 +3,10 @@ import { getDb } from '@/db';
 import { eventReviewQueue, postcodeStats, productRules, shipments } from '@/db/schema';
 import { DepositRow } from '@/components/DepositRow';
 import { IntegrationsPanel } from '@/components/IntegrationsPanel';
+import { JobRunsPanel } from '@/components/JobRunsPanel';
 import { integrationStatus } from '@/lib/integrations';
+import { jobHealth } from '@/lib/engine-health';
+import { getSetting } from '@/lib/settings';
 import { Card, PageHeading } from '@/components/ui';
 
 // Per-request, behind a login or a signed token, and it reads the database.
@@ -19,7 +22,7 @@ export const runtime = 'nodejs';
  * office list re-sorts straight away.
  */
 export default async function SettingsPage() {
-  const [rules, counts, watched, review, integrations] = await Promise.all([
+  const [rules, counts, watched, review, integrations, jobs, batchMode] = await Promise.all([
     getDb().select().from(productRules).orderBy(productRules.productCode),
     getDb().select({ code: shipments.productCode, n: raw<number>`count(*)::int` })
       .from(shipments).groupBy(shipments.productCode),
@@ -28,6 +31,8 @@ export default async function SettingsPage() {
       .where(isNull(eventReviewQueue.resolvedAt))
       .orderBy(desc(eventReviewQueue.lastSeenAt)).limit(20),
     integrationStatus(),
+    jobHealth(),
+    getSetting('correosBatchMode'),
   ]);
 
   const countFor = (code: string) => counts.find((c) => c.code === code)?.n ?? 0;
@@ -78,7 +83,11 @@ export default async function SettingsPage() {
       </div>
 
       <div className="mt-[22px]">
-        <IntegrationsPanel integrations={integrations} />
+        <IntegrationsPanel integrations={integrations} batchMode={batchMode} />
+      </div>
+
+      <div className="mt-[22px]">
+        <JobRunsPanel jobs={jobs} />
       </div>
 
       <div className="mt-[22px] rounded-[5px] border border-line bg-surface px-4 py-[14px]">

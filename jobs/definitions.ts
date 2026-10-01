@@ -5,16 +5,16 @@ import {
   shipmentEvents, shipments, stores, importBatches, tasks,
 } from '@/db/schema';
 import { now, DAY, HOUR } from '@/lib/clock';
-import { madridParts, madridMidnightUtc, human, shortDate } from '@/lib/time';
+import { madridParts, madridMidnightUtc, madridDateKey, human, shortDate } from '@/lib/time';
 import { normalisePayload } from '@/lib/carriers/correos/normalise';
-import { trackpub } from '@/lib/carriers/correos/trackpub';
+import { MAX_BATCH, trackpub } from '@/lib/carriers/correos/trackpub';
 import { ingestEvent } from '@/lib/shipments/ingest';
 import { liveShipmentIds } from '@/lib/shipments/repo';
 import { runTick } from '@/lib/escalation/run';
 import { openTask } from '@/lib/escalation/tasks';
-import { getSettings } from '@/lib/settings';
+import { getSetting, getSettings, setSetting } from '@/lib/settings';
 import { say } from '@/lib/activity';
-import { sendInternalAlert } from '@/lib/mail/send';
+import { raiseAlert } from '@/lib/alerts';
 import { purgeExpiredSessions } from '@/lib/auth/session';
 import { purgeRateLimits } from '@/lib/rate-limit';
 import { callQueue, money } from '@/lib/escalation/decide';
@@ -32,36 +32,85 @@ import { ingestShopifyOrder, type ShopifyOrderPayload } from '@/lib/carriers/sho
  * and the escalation fires table means a rung can only fire once.
  */
 
-export type JobName =
-  | 'escalation-tick'
-  | 'push-drain'
-  | 'nightly-reconcile'
-  | 'stale-detector'
-  | 'daily-digest'
-  | 'push-heartbeat'
-  | 'shopify-backfill'
-  | 'import-reminder'
-  | 'postcode-stats'
-  | 'housekeeping';
+/**
+ * Is Correos' push integration set up at all?
+ *
+ * Tracking currently runs on trackpub only; Track&TracePush is not configured.
+ * Both of the jobs that exist to serve push have to know that, or they spend
+ * their time reporting on something nobody switched on — the heartbeat would
+ * email a false alarm every working hour, and the drain would poll an empty
+ * table every five minutes for ever.
+ */
+export function pushConfigured(): boolean {
+  return Boolean(process.env.CORREOS_PUSH_CLIENT_ID && process.env.CORREOS_PUSH_CLIENT_SECRET);
+}
 
-export interface JobResult { detail: Record<string, unknown> }
+/**
+ * Every scheduled job. The order is the order they appear on the Settings
+ * screen: the ones that matter most first.
+ */
+export const JOB_NAMES = [
+  'escalation-tick',
+  'reconcile',
+  'push-drain',
+  'push-heartbeat',
+  'shopify-backfill',
+  'stale-detector',
+  'daily-digest',
+  'import-reminder',
+  'postcode-stats',
+  'housekeeping',
+] as const;
 
-/** Wraps a job so every run is recorded, and a failure never kills the worker. */
-export async function runJob(job: JobName, fn: () => Promise<JobResult>): Promise<void> {
+export type JobName = typeof JOB_NAMES[number];
+
+export interface JobResult {
+  detail: Record<string, unknown>;
+  /**
+   * The run decided there was nothing for it to do. Recorded separately from
+   * `ok`, because a skip is a successful run of a job that had no work — it
+   * proves the scheduler is alive, and it must not count as "today's digest
+   * has been sent".
+   */
+  skipped?: boolean;
+}
+
+export interface JobOutcome {
+  ok: boolean;
+  skipped: boolean;
+  detail: Record<string, unknown>;
+}
+
+/**
+ * Wraps a job so every run is recorded, and a failure never kills the worker.
+ *
+ * It returns the outcome rather than swallowing it. The route needs to know: a
+ * job that threw used to return HTTP 200 with an empty detail, so Vercel's cron
+ * log showed green on the morning the digest failed.
+ */
+export async function runJob(job: JobName, fn: () => Promise<JobResult>): Promise<JobOutcome> {
   const [run] = await getDb().insert(jobRuns).values({ job, startedAt: now() })
     .returning({ id: jobRuns.id });
 
   try {
-    const { detail } = await fn();
+    const result = await fn();
+    // A job that returns `detail.skipped` is saying it had nothing to do, and
+    // several already did before the column existed. Honour both.
+    const skipped = result.skipped ?? typeof result.detail.skipped === 'string';
+
     await getDb().update(jobRuns)
-      .set({ finishedAt: now(), ok: true, detail })
+      .set({ finishedAt: now(), ok: true, skipped, detail: result.detail })
       .where(eq(jobRuns.id, run.id));
+
+    return { ok: true, skipped, detail: result.detail };
   } catch (err) {
     const message = err instanceof Error ? `${err.message}\n${err.stack ?? ''}` : String(err);
     console.error(`[job:${job}] failed:`, message);
     await getDb().update(jobRuns)
-      .set({ finishedAt: now(), ok: false, detail: { error: message } })
+      .set({ finishedAt: now(), ok: false, skipped: false, detail: { error: message } })
       .where(eq(jobRuns.id, run.id));
+
+    return { ok: false, skipped: false, detail: { error: message } };
   }
 }
 
@@ -83,6 +132,11 @@ export async function escalationTick(): Promise<JobResult> {
  * clear `processed_at` on the affected rows and they run again.
  */
 export async function drainPushInbox(limit = 200): Promise<JobResult> {
+  // Nothing can be in the staging table if the receiver refuses every request,
+  // so there is nothing to drain. Return before opening a transaction rather
+  // than querying an empty table every five minutes.
+  if (!pushConfigured()) return { detail: { skipped: 'push not configured' } };
+
   const rows = await getDb().select().from(correosPushInbox)
     .where(isNull(correosPushInbox.processedAt))
     .orderBy(correosPushInbox.receivedAt)
@@ -128,96 +182,153 @@ export async function drainPushInbox(limit = 200): Promise<JobResult> {
  * was down for an hour, this is the only thing that will ever notice.
  */
 export interface ReconcileOptions {
-  /** Most parcels to look up in one run. */
+  /** Most parcels to consider in one run. The budget is the real limiter. */
   batchSize?: number;
-  /** Stop starting new lookups after this long, so the run always finishes. */
+  /** Stop starting new requests after this long, so the run always finishes. */
   budgetMs?: number;
 }
 
+/**
+ * States where being out of date actually costs something.
+ *
+ * A parcel at a post office is on a countdown; one whose delivery failed is
+ * about to be; one with a bad address is waiting on a person. Everything else
+ * is moving normally, and learning about it three hours late changes nothing.
+ *
+ * The brief called these delivery_failed, at_office and address_issue. This
+ * codebase calls them failed, at_office and bad_address — same three states.
+ */
+const URGENT_STATES = ['failed', 'at_office', 'bad_address'];
+
+/**
+ * Ask Correos about every live parcel, urgent ones first.
+ *
+ * Push is not configured, so this is the only way tracking reaches the system.
+ * About a thousand parcels a day are shipped, so roughly five thousand are live
+ * at once and every one must be refreshed at least every twelve hours. Running
+ * every three hours with batches of a hundred is about fifty requests a run,
+ * which clears the whole live set eight times a day.
+ *
+ * Bounded twice over: at most `batchSize` parcels, and no new request started
+ * after `budgetMs`. Both sit inside the route's maxDuration, so the run ends by
+ * choice rather than by being killed half way through a sweep.
+ */
 export async function reconcile(opts: ReconcileOptions = {}): Promise<JobResult> {
-  const client = trackpub();
+  const knownMode = await getSetting('correosBatchMode');
+  const client = trackpub({ batchMode: knownMode });
+
   if (!client.configured) {
     return { detail: { skipped: 'Correos credentials are not configured' } };
   }
 
-  const batchSize = opts.batchSize ?? Number(process.env.RECONCILE_BATCH_SIZE ?? 200);
-  const budgetMs = opts.budgetMs ?? Number(process.env.RECONCILE_BUDGET_MS ?? 45_000);
+  const batchSize = opts.batchSize ?? Number(process.env.RECONCILE_BATCH_SIZE ?? 6000);
+  const budgetMs = opts.budgetMs ?? Number(process.env.RECONCILE_BUDGET_MS ?? 240_000);
 
   // Two different clocks, deliberately. The budget measures how long this
-  // invocation has actually been running, so it must be wall-clock — a demo
-  // or a test that moves the clock forward a fortnight must not convince the
-  // sweep it has been going for a fortnight. The cursor comparison below is
-  // about the data, so it uses the injectable clock that wrote the stamps.
+  // invocation has actually been running, so it must be wall-clock — a demo or
+  // a test that moves the clock forward a fortnight must not convince the sweep
+  // it has been going for a fortnight. The cursor comparison below is about the
+  // data, so it uses the injectable clock that wrote the stamps.
   const elapsedFrom = Date.now();
   const runStartedAt = now();
 
-  // Oldest-checked first. This ordering is the cursor: a run that stops early
-  // leaves the rest with an older stamp, so the next run continues from
-  // exactly where this one gave up. Nothing to persist separately, nothing to
-  // get out of step when parcels are added or finish, and no parcel can be
-  // starved because the one checked longest ago is always next.
-  const batch = await getDb().select({
+  // Urgent first, then least-recently-checked. The ordering IS the cursor: a
+  // run that stops early leaves the rest with an older stamp, so the next run
+  // continues from exactly where this one gave up — nothing to persist, nothing
+  // to get out of step when parcels are added or finish, and no parcel can be
+  // starved because the one checked longest ago is always next in its bucket.
+  const queue = await getDb().select({
     id: shipments.id,
     code: shipments.shippingCode,
+    state: shipments.state,
   })
     .from(shipments)
     .where(and(
       isNull(shipments.droppedAt),
       notInArray(shipments.state, ['delivered', 'collected', 'returned']),
     ))
-    // NULLS FIRST is the point: Postgres sorts nulls last on an ascending
-    // order, which would put the parcels we have never checked at the very
-    // back of the queue — exactly backwards.
-    .orderBy(raw`${shipments.lastReconciledAt} ASC NULLS FIRST`, asc(shipments.createdAt))
+    .orderBy(
+      raw`CASE WHEN ${shipments.state} IN ('failed', 'at_office', 'bad_address') THEN 0 ELSE 1 END ASC`,
+      raw`${shipments.lastReconciledAt} ASC NULLS FIRST`,
+      asc(shipments.createdAt),
+    )
     .limit(batchSize);
 
-  let checked = 0;
+  const byCode = new Map(queue.map((q) => [q.code.toUpperCase(), q.id]));
+
+  let asked = 0;
   let recovered = 0;
   let missing = 0;
+  let requests = 0;
   let stoppedEarly: string | null = null;
   const failures: string[] = [];
 
-  for (const { id, code } of batch) {
-    // Check the budget before starting a lookup, never in the middle of one.
-    // Being killed mid-sweep is how a parcel gets marked checked without
+  for (let i = 0; i < queue.length; i += MAX_BATCH) {
+    // Check the budget before starting a request, never in the middle of one.
+    // Being killed mid-sweep is how a parcel gets stamped as checked without
     // having been checked.
     if (Date.now() - elapsedFrom > budgetMs) {
       stoppedEarly = 'ran out of time — the next run continues from here';
       break;
     }
 
-    const r = await client.lookup(code);
-    checked += 1;
+    const chunk = queue.slice(i, i + MAX_BATCH).map((q) => q.code);
+    // Hand the client our deadline so it can stop between requests rather than
+    // only between batches — a chunk that falls back to one request per parcel
+    // is a hundred requests, and a budget checked only after all of them is
+    // not a budget.
+    const result = await client.lookupMany(chunk, { deadline: elapsedFrom + budgetMs });
+    requests += result.requests;
 
-    if (!r.ok) {
-      if (r.status === 404) {
+    /** Parcels we genuinely got an answer about, and may stamp as checked. */
+    const answered: string[] = [];
+
+    for (const [code, one] of result.byCode) {
+      asked += 1;
+
+      if (one.ok) {
+        for (const event of one.outcome.events) {
+          const ingested = await ingestEvent(event);
+          if (ingested.status === 'inserted') recovered += 1;
+        }
+        answered.push(code);
+        continue;
+      }
+
+      if (one.status === 404) {
+        // Correos has never heard of it. Asking again in three hours will not
+        // change that, so it counts as checked.
         missing += 1;
-        // Correos has never heard of it. Asking again in two hours will not
-        // change that, so it still counts as checked.
-        await markReconciled(id);
-      } else {
-        failures.push(`${code}: ${r.error}`);
+        answered.push(code);
+        continue;
       }
 
-      // A rate limit or an outage means stop, not push harder. The next run
-      // picks up where this one stopped; a blocked account picks up nothing.
-      if (r.retryable && failures.length >= 10) {
-        stoppedEarly = `Correos is refusing requests (${r.error})`;
-        break;
-      }
-      continue;
+      failures.push(`${code}: ${one.error}`);
     }
 
-    for (const e of r.outcome.events) {
-      const ingested = await ingestEvent(e);
-      if (ingested.status === 'inserted') recovered += 1;
+    await markReconciled(answered.map((c) => byCode.get(c)).filter(isString), runStartedAt);
+
+    // Codes the deadline arrived before. Nothing was learnt about them, so they
+    // keep their old stamp and lead the next run's queue.
+    if (result.notReached.length) {
+      stoppedEarly = 'ran out of time — the next run continues from here';
+      break;
     }
 
-    await markReconciled(id);
+    // A rate limit or an outage means stop, not push harder. The next run picks
+    // up where this one stopped; a blocked account picks up nothing.
+    if (failures.length >= 10) {
+      stoppedEarly = `Correos is refusing requests (${failures[0]})`;
+      break;
+    }
   }
 
+  // Remember what we learnt about the undocumented batch format, so the next
+  // run does not have to probe for it again.
+  if (client.mode !== knownMode) await setSetting('correosBatchMode', client.mode);
+
   if (recovered > 0) {
-    await say(`Check with Correos found ${recovered} updates that never reached us`);
+    await say(`Check with Correos found ${recovered} updates that had not reached us`);
   }
 
   const [remaining] = await getDb().select({ n: raw<number>`count(*)::int` })
@@ -233,10 +344,13 @@ export async function reconcile(opts: ReconcileOptions = {}): Promise<JobResult>
 
   return {
     detail: {
-      checked,
+      asked,
       recovered,
       missing,
-      queued: batch.length,
+      requests,
+      live: queue.length,
+      batchMode: client.mode,
+      ...(client.diagnosis ? { batchNote: client.diagnosis } : {}),
       stillToCheck: remaining?.n ?? 0,
       tookMs: Date.now() - elapsedFrom,
       ...(stoppedEarly ? { stoppedEarly } : {}),
@@ -245,14 +359,21 @@ export async function reconcile(opts: ReconcileOptions = {}): Promise<JobResult>
   };
 }
 
-async function markReconciled(shipmentId: string): Promise<void> {
+/**
+ * Stamp a whole chunk at once. One UPDATE per parcel would be five thousand
+ * round trips through a connection pooler for a sweep that only made fifty
+ * HTTP requests.
+ */
+async function markReconciled(ids: string[], at: Date): Promise<void> {
+  if (!ids.length) return;
   await getDb().update(shipments)
-    .set({ lastReconciledAt: now() })
-    .where(eq(shipments.id, shipmentId));
+    .set({ lastReconciledAt: at })
+    .where(inArray(shipments.id, ids));
 }
 
-/** Kept under its old name so nothing that called it has to change. */
-export const nightlyReconcile = reconcile;
+function isString(x: string | undefined): x is string {
+  return typeof x === 'string';
+}
 
 /* ------------------------------------------------------------- 07:30 Madrid */
 
@@ -289,7 +410,13 @@ export async function staleDetector(): Promise<JobResult> {
   }
 
   if (rows.length) {
-    await say(`${rows.length} parcels have had no update for over ${days} days — on your list to ask Correos`);
+    // Keyed to the day: the hourly catch-up schedule means this job can be
+    // attempted many times before one succeeds, and the feed should not carry
+    // the same sentence two dozen times.
+    await say(
+      `${rows.length} parcels have had no update for over ${days} days — on your list to ask Correos`,
+      { dedupeKey: `stale-detector:${madridDateKey(now())}` },
+    );
   }
 
   return { detail: { flagged: rows.length, staleAfterHours } };
@@ -305,7 +432,8 @@ export async function dailyDigest(): Promise<JobResult> {
   const view = await todayView(0, now());
 
   if (!view.rows.length) {
-    await sendInternalAlert({
+    await raiseAlert({
+      dedupeKey: `digest-empty:${madridDateKey(now())}`,
       subject: 'Return Shield — nothing needs you today',
       lines: [
         'Every parcel is either moving normally or already handled.',
@@ -332,12 +460,16 @@ export async function dailyDigest(): Promise<JobResult> {
 
   if (view.rows.length > 15) lines.push(`...and ${view.rows.length - 15} more on the dashboard.`);
 
-  await sendInternalAlert({
+  const raised = await raiseAlert({
+    // One digest per Madrid day, whatever the schedule does. This is what makes
+    // an hourly catch-up schedule safe: the second invocation's insert does
+    // nothing, so nobody gets the same digest twice.
+    dedupeKey: `digest:${madridDateKey(now())}`,
     subject: `Return Shield — ${view.headline}`,
     lines,
   });
 
-  return { detail: { items: view.rows.length, calls: view.callCount } };
+  return { detail: { items: view.rows.length, calls: view.callCount, raised } };
 }
 
 /* ----------------------------------------------------------------- hourly */
@@ -347,6 +479,11 @@ export async function dailyDigest(): Promise<JobResult> {
  * happened. Correos scans parcels all day; silence is a symptom.
  */
 export async function pushHeartbeat(): Promise<JobResult> {
+  // This job's whole premise is "events should be arriving by push, and they
+  // are not". With push unconfigured that premise is false, and the alert it
+  // would send is a false alarm — every working hour, for ever.
+  if (!pushConfigured()) return { detail: { skipped: 'push not configured' } };
+
   const at = now();
   const hour = madridParts(at).hour;
   const weekday = madridParts(at).weekday;
@@ -371,7 +508,10 @@ export async function pushHeartbeat(): Promise<JobResult> {
   const live = await liveShipmentIds();
   if (live.length === 0) return { detail: { events: 0, healthy: true, note: 'nothing in flight' } };
 
-  await sendInternalAlert({
+  await raiseAlert({
+    // One per three-hour window, so a heartbeat that fires twice in the same
+    // hour does not email twice.
+    dedupeKey: `push-silent:${madridDateKey(at)}:${madridParts(at).hour}`,
     subject: 'Return Shield — no tracking updates from Correos for three hours',
     lines: [
       `Nothing has arrived from Correos since ${shortDate(since)} and there are ${live.length} parcels in flight.`,
@@ -383,8 +523,8 @@ export async function pushHeartbeat(): Promise<JobResult> {
       '  · has the source IP Correos calls from changed?',
       '  · are CORREOS_PUSH_CLIENT_ID / _SECRET still right?',
       '',
-      'The nightly reconcile will still pick everything up, so nothing is lost — but',
-      'countdowns will be up to a day stale until push is back.',
+      'The reconcile sweep still picks everything up, so nothing is lost — but',
+      'countdowns will be up to three hours stale until push is back.',
     ],
   });
 
@@ -456,7 +596,8 @@ export async function importReminder(): Promise<JobResult> {
     return { detail: { lastUpload: last.createdAt, nudged: false } };
   }
 
-  await sendInternalAlert({
+  await raiseAlert({
+    dedupeKey: `import-reminder:${madridDateKey(at)}`,
     subject: 'Return Shield — TikTok orders have not been uploaded',
     lines: [
       last
@@ -549,13 +690,32 @@ export async function rebuildPostcodeStats(): Promise<JobResult> {
 export async function housekeeping(): Promise<JobResult> {
   const [sessions, limits] = await Promise.all([purgeExpiredSessions(), purgeRateLimits()]);
 
+  // job_runs grows by about five hundred rows a day and the only thing that
+  // reads it wants the recent past. A month is plenty to answer "when did this
+  // last work".
+  const runCutoff = new Date(now().getTime() - 30 * DAY);
+  const runs = await getDb().delete(jobRuns)
+    .where(lt(jobRuns.startedAt, runCutoff))
+    .returning({ id: jobRuns.id });
+
+  const { purgeDeliveredAlerts } = await import('@/lib/alerts');
+  const oldAlerts = await purgeDeliveredAlerts(90);
+
   // Push payloads older than 90 days have served their purpose as evidence.
   const cutoff = new Date(now().getTime() - 90 * DAY);
   const inbox = await getDb().delete(correosPushInbox)
     .where(and(isNotNull(correosPushInbox.processedAt), lt(correosPushInbox.receivedAt, cutoff)))
     .returning({ id: correosPushInbox.id });
 
-  return { detail: { sessions, rateLimitBuckets: limits, pushPayloads: inbox.length } };
+  return {
+    detail: {
+      sessions,
+      rateLimitBuckets: limits,
+      pushPayloads: inbox.length,
+      jobRuns: runs.length,
+      alerts: oldAlerts,
+    },
+  };
 }
 
 function appUrl(): string {

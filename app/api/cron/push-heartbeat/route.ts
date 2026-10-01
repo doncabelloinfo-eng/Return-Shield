@@ -5,4 +5,4 @@ export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 export const maxDuration = 30;
 
-export const GET = cronRoute('push-heartbeat', pushHeartbeat);
+export const GET = cronRoute('push-heartbeat', pushHeartbeat, { maxDurationSeconds: 30 });

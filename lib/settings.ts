@@ -20,6 +20,16 @@ export interface AppSettings {
   watchFailRateMultiple: number;
   /** Demo mode only: minutes added to the real clock. */
   demoClockOffsetMinutes: number;
+  /**
+   * What we have learnt about Correos' undocumented multi-code format.
+   *
+   * 'unknown' means probe it; 'comma' means comma-separated works; 'single'
+   * means it does not and every parcel needs its own request. Stored rather
+   * than held in memory because serverless instances are short-lived and
+   * numerous — an in-memory answer would be re-probed by every cold start, and
+   * the operator could not see which mode is in use.
+   */
+  correosBatchMode: 'unknown' | 'comma' | 'single';
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -30,6 +40,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   staleAfterHours: 72,
   watchFailRateMultiple: 2,
   demoClockOffsetMinutes: 0,
+  correosBatchMode: 'unknown',
 };
 
 export async function getSettings(): Promise<AppSettings> {

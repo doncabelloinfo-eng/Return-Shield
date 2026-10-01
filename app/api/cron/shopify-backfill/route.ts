@@ -5,4 +5,4 @@ export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 export const maxDuration = 120;
 
-export const GET = cronRoute('shopify-backfill', shopifyBackfill);
+export const GET = cronRoute('shopify-backfill', shopifyBackfill, { maxDurationSeconds: 120 });

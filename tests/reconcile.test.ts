@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeEach, afterAll, afterEach } from 'vitest';
-import { and, isNull, notInArray } from 'drizzle-orm';
+import { and, eq, isNull, notInArray } from 'drizzle-orm';
 import { getDb } from '@/db';
 import { shipments } from '@/db/schema';
 import { TestClock, resetClock } from '@/lib/clock';
 import { reconcile } from '@/jobs/definitions';
+import { ingestEvent } from '@/lib/shipments/ingest';
 import { TrackpubClient, setTrackpub, type LookupResult } from '@/lib/carriers/correos/trackpub';
 import { resetDb, closeDb } from './helpers/db';
 import { makeShipment } from './helpers/fixtures';
@@ -30,15 +31,45 @@ afterAll(async () => {
   await closeDb();
 });
 
-/** A trackpub that answers instantly and records what it was asked. */
-function stubTrackpub(answer: (code: string) => LookupResult, delayMs = 0) {
+/**
+ * A trackpub that answers instantly and records what it was asked.
+ *
+ * Batching happens inside the real client, so the stub stands in at the
+ * lookupMany boundary and answers per code. The per-code delay models the
+ * latency the budget has to work against.
+ */
+function stubTrackpub(answer: (code: string) => LookupResult, delayMs = 0, batch = 100) {
   const asked: string[] = [];
   const client = {
     configured: true,
+    mode: 'comma',
+    diagnosis: null,
+    adoptMode() { /* the stub's mode is fixed; nothing to adopt */ },
     async lookup(code: string): Promise<LookupResult> {
       asked.push(code);
       if (delayMs) await new Promise((r) => setTimeout(r, delayMs));
       return answer(code);
+    },
+    async lookupMany(codes: readonly string[], opts: { deadline?: number } = {}) {
+      const byCode = new Map<string, LookupResult>();
+      let requests = 0;
+      for (let i = 0; i < codes.length; i += batch) {
+        if (opts.deadline !== undefined && Date.now() >= opts.deadline) break;
+        const chunk = codes.slice(i, i + batch);
+        requests += 1;
+        if (delayMs) await new Promise((r) => setTimeout(r, delayMs));
+        for (const code of chunk) {
+          asked.push(code);
+          byCode.set(code, answer(code));
+        }
+      }
+      return {
+        byCode,
+        notReached: codes.filter((c) => !byCode.has(c)),
+        mode: 'comma' as const,
+        requests,
+        batchDiagnosis: null,
+      };
     },
   } as unknown as TrackpubClient;
   setTrackpub(client);
@@ -47,7 +78,7 @@ function stubTrackpub(answer: (code: string) => LookupResult, delayMs = 0) {
 
 const emptyAnswer = (): LookupResult => ({
   ok: true,
-  outcome: { events: [], problems: [] },
+  outcome: { events: [], problems: [], codesSeen: [] },
   raw: {},
 });
 
@@ -68,7 +99,7 @@ const stillToCheck = async () => {
 
 describe('the reconcile sweep', () => {
   it('does nothing, loudly, when Correos is not configured', async () => {
-    setTrackpub(new TrackpubClient({ clientId: '', clientSecret: '', jwt: '' }));
+    setTrackpub(new TrackpubClient({ clientId: '', clientSecret: '' }));
     await makeMany(2);
     const r = await reconcile();
     expect(r.detail.skipped).toBe('Correos credentials are not configured');
@@ -81,7 +112,7 @@ describe('the reconcile sweep', () => {
     const r = await reconcile({ batchSize: 4 });
 
     expect(asked).toHaveLength(4);
-    expect(r.detail.checked).toBe(4);
+    expect(r.detail.asked).toBe(4);
     expect(r.detail.stillToCheck).toBe(6);
   });
 
@@ -102,8 +133,9 @@ describe('the reconcile sweep', () => {
 
   it('resumes where it stopped when it runs out of time', async () => {
     await makeMany(8);
-    // 30ms per lookup against a 100ms budget: it gets through a few and stops.
-    const asked = stubTrackpub(emptyAnswer, 30);
+    // One code per request and 30ms each, against a 100ms budget: it gets
+    // through a few and stops.
+    const asked = stubTrackpub(emptyAnswer, 30, 1);
 
     const first = await reconcile({ batchSize: 8, budgetMs: 100 });
     expect(first.detail.stoppedEarly).toMatch(/ran out of time/);
@@ -130,7 +162,7 @@ describe('the reconcile sweep', () => {
     // and then goes unchecked for as long as it takes everything else to catch
     // up with it.
     await makeMany(5);
-    const asked = stubTrackpub(emptyAnswer, 30);
+    const asked = stubTrackpub(emptyAnswer, 30, 1);
     await reconcile({ batchSize: 5, budgetMs: 60 });
 
     const rows = await getDb().select({
@@ -147,12 +179,13 @@ describe('the reconcile sweep', () => {
     await makeMany(40);
     const asked = stubTrackpub(() => ({
       ok: false, status: 429, error: 'Too Many Requests', retryable: true,
-    }));
+    }), 0, 5);
 
     const r = await reconcile({ batchSize: 40, budgetMs: 60_000 });
 
     expect(r.detail.stoppedEarly).toMatch(/refusing requests/);
-    expect(asked.length).toBeLessThanOrEqual(10);
+    // One slice of requests, then stop — not a second pass over the rest.
+    expect(r.detail.requests).toBeLessThanOrEqual(8);
     // And nothing got a stamp, so the next run retries all of them.
     expect(await stillToCheck()).toBe(40);
   });
@@ -174,6 +207,7 @@ describe('the reconcile sweep', () => {
       raw: {},
       outcome: {
         problems: [],
+        codesSeen: [f.shippingCode],
         events: [{
           shippingCode: f.shippingCode,
           eventCode: 'E-05',
@@ -202,6 +236,7 @@ describe('the reconcile sweep', () => {
       raw: {},
       outcome: {
         problems: [],
+        codesSeen: [f.shippingCode],
         events: [{
           shippingCode: f.shippingCode,
           eventCode: 'E-05',
@@ -217,5 +252,81 @@ describe('the reconcile sweep', () => {
     stubTrackpub(answer);
     expect((await reconcile({ batchSize: 10 })).detail.recovered).toBe(1);
     expect((await reconcile({ batchSize: 10 })).detail.recovered).toBe(0);
+  });
+});
+
+describe('the order parcels are swept in', () => {
+  /** Put a shipment into a given state by handing it the matching event. */
+  async function inState(code: string, desc: string) {
+    const f = await makeShipment({ shippingCode: code });
+    await ingestEvent({
+      shippingCode: code,
+      eventCode: `E-${desc.slice(0, 10)}`,
+      eventDesc: desc,
+      occurredAt: clock.now(),
+      source: 'push',
+      officeCode: desc.startsWith('Disponible') ? f.officeCode : null,
+      rawPayload: {},
+    });
+    return f;
+  }
+
+  it('asks about the urgent states before anything else', async () => {
+    // A parcel at a post office is on a countdown, one whose delivery failed is
+    // about to be, and one with a bad address is waiting on a person. A parcel
+    // in transit is not: learning about it three hours later costs nothing.
+    await inState('PQ8000000001ES', 'En tránsito');
+    await inState('PQ8000000002ES', 'Disponible en oficina para recoger');
+    await inState('PQ8000000003ES', 'Admitido');
+    await inState('PQ8000000004ES', 'Intento de entrega fallido — ausente');
+    await inState('PQ8000000005ES', 'Dirección incorrecta');
+    await inState('PQ8000000006ES', 'En reparto');
+
+    const asked = stubTrackpub(emptyAnswer, 0, 1);
+    await reconcile({ batchSize: 3 });
+
+    expect(asked).toHaveLength(3);
+    expect(asked.sort()).toEqual(['PQ8000000002ES', 'PQ8000000004ES', 'PQ8000000005ES']);
+  });
+
+  it('takes the least-recently-checked first within the urgent group too', async () => {
+    // Otherwise the same few urgent parcels get asked about every run and the
+    // rest of the urgent group is starved behind them.
+    for (const n of [1, 2, 3, 4]) {
+      await inState(`PQ810000000${n}ES`, 'Disponible en oficina para recoger');
+    }
+
+    const first = stubTrackpub(emptyAnswer, 0, 1);
+    await reconcile({ batchSize: 2 });
+    setTrackpub(null);
+
+    const second = stubTrackpub(emptyAnswer, 0, 1);
+    await reconcile({ batchSize: 2 });
+
+    expect(second).toHaveLength(2);
+    expect(second.some((c) => first.includes(c))).toBe(false);
+  });
+
+  it('still reaches the unurgent ones when there is room', async () => {
+    await inState('PQ8200000001ES', 'En tránsito');
+    await inState('PQ8200000002ES', 'Disponible en oficina para recoger');
+
+    const asked = stubTrackpub(emptyAnswer);
+    await reconcile({ batchSize: 100 });
+
+    expect(asked.sort()).toEqual(['PQ8200000001ES', 'PQ8200000002ES']);
+  });
+
+  it('never asks about a parcel that is finished or written off', async () => {
+    await inState('PQ8300000001ES', 'Entregado');
+    await inState('PQ8300000002ES', 'Entregado en oficina');
+    const dropped = await inState('PQ8300000003ES', 'Disponible en oficina para recoger');
+    await getDb().update(shipments).set({ droppedAt: clock.now() })
+      .where(eq(shipments.id, dropped.shipmentId));
+
+    const asked = stubTrackpub(emptyAnswer);
+    await reconcile({ batchSize: 100 });
+
+    expect(asked).toEqual([]);
   });
 });

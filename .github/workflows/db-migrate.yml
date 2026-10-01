@@ -1,0 +1,116 @@
+# Run migrations against the production database.
+#
+# Manual only. A migration must never ride along with a deploy: a failed one
+# would take the site down on a change that had nothing to do with it, and a
+# build that migrates tries to do so once per deployment, previews included,
+# against whatever database it was handed.
+#
+# This exists because cloud sessions cannot reach Postgres ports, so somebody
+# has to run migrations from somewhere that can. GitHub Actions can.
+#
+# THIS REPOSITORY IS PUBLIC, SO THESE LOGS ARE PUBLIC. Nothing here may print a
+# password, a connection string or an email address. GitHub masks registered
+# secrets in logs, but that is a safety net, not a licence to echo them — a
+# secret interpolated into a URL and printed can defeat the masking.
+name: Database migrate
+
+on:
+  workflow_dispatch:
+    inputs:
+      seed:
+        description: 'Also run db:seed (creates the first user if absent, inserts product rules). Safe to re-run.'
+        type: boolean
+        required: false
+        default: false
+
+# Two operators pressing the button at once would have two migrators competing
+# for the same advisory lock. One at a time, and never cancel one half way
+# through — an interrupted migration is the thing this is all trying to avoid.
+concurrency:
+  group: db-migrate
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  migrate:
+    name: Apply migrations
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out the branch this was dispatched from
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Fail before touching the database rather than half way through. A
+      # missing secret here is a configuration mistake, and the error should say
+      # which one without saying what any of them are.
+      - name: Check the migration secret is present
+        env:
+          DATABASE_URL: ${{ secrets.MIGRATE_DATABASE_URL }}
+        run: |
+          if [ -z "${DATABASE_URL}" ]; then
+            echo "::error::MIGRATE_DATABASE_URL is not set. Add it under Settings → Secrets and variables → Actions."
+            echo "It should be Supabase's SESSION pooler URL (port 5432), not the transaction pooler the app uses."
+            exit 1
+          fi
+          echo "MIGRATE_DATABASE_URL is present."
+
+      - name: Check the seed secrets are present
+        if: ${{ inputs.seed }}
+        env:
+          SEED_EMAIL: ${{ secrets.SEED_EMAIL }}
+          SEED_PASSWORD: ${{ secrets.SEED_PASSWORD }}
+          SEED_NAME: ${{ secrets.SEED_NAME }}
+        run: |
+          missing=""
+          [ -z "${SEED_EMAIL}" ]    && missing="${missing} SEED_EMAIL"
+          [ -z "${SEED_PASSWORD}" ] && missing="${missing} SEED_PASSWORD"
+          [ -z "${SEED_NAME}" ]     && missing="${missing} SEED_NAME"
+          if [ -n "${missing}" ]; then
+            echo "::error::The seed was requested but these secrets are not set:${missing}"
+            echo "There is deliberately no default password, so the seed cannot run without them."
+            exit 1
+          fi
+          echo "All three seed secrets are present."
+
+      - name: Apply migrations
+        env:
+          DATABASE_URL: ${{ secrets.MIGRATE_DATABASE_URL }}
+        run: npm run db:migrate
+
+      # Re-runnable by design: an existing user's password is never changed, and
+      # product rules are keyed by product code so they are not duplicated — and
+      # a deposit window the operator has since edited on the Settings screen is
+      # not reset back to the working assumption.
+      #
+      # DEMO_MODE is deliberately absent, so no sample parcels are created.
+      - name: Seed
+        if: ${{ inputs.seed }}
+        env:
+          DATABASE_URL: ${{ secrets.MIGRATE_DATABASE_URL }}
+          SEED_EMAIL: ${{ secrets.SEED_EMAIL }}
+          SEED_PASSWORD: ${{ secrets.SEED_PASSWORD }}
+          SEED_NAME: ${{ secrets.SEED_NAME }}
+        run: npm run db:seed
+
+      - name: Done
+        run: |
+          echo "### Migrations applied" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Branch: \`${GITHUB_REF_NAME}\` · commit \`${GITHUB_SHA:0:7}\`" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ inputs.seed }}" = "true" ]; then
+            echo "Seed: requested." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Seed: not requested." >> "$GITHUB_STEP_SUMMARY"
+          fi

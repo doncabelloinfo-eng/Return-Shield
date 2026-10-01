@@ -215,15 +215,28 @@ the URL exists.
 
 ### Correos trackpub — we call them
 
-`reconcile` sweeps live shipments **every two hours**. This is the safety net
-for push: Correos does not retry, so if the receiver was down for an hour,
-nothing else will ever notice. Nightly would have meant a lost *"at office"*
-event leaving a countdown up to a day wrong.
+`reconcile` sweeps live shipments **every three hours**. Push is not
+configured, so this is not a safety net for it — it is the only way an event
+ever reaches us. Correos does not retry either way, so nothing else would ever
+notice a dropped update, and a lost *"at office"* event would leave a countdown
+wrong on the one screen whose whole job is to be right about how many days are
+left.
 
-It is bounded — a batch cap and a time budget, both inside the route's
-`maxDuration` — and it resumes: `shipments.last_reconciled_at` is the cursor,
-and a run that stops early leaves the rest for the next one. The client backs
-off on 429s and 5xxs and gives up rather than hammering.
+A token is minted by OAuth client-credentials against CorreosID and cached until
+its `exp` claim minus a minute; a 401 from trackpub drops it, fetches one more
+and retries once. Codes go up 100 to a request — the multi-parcel format is
+undocumented, so the client tries comma-separated first, checks that the answer
+actually covers what it asked about, and falls back to one request per code if
+it does not. Which mode is in use is on the Settings screen, with a lever to
+make it probe again.
+
+Urgent parcels are swept first — `delivery_failed`, `at_office`,
+`address_issue` — and the rest least-recently-checked first, so a run cut short
+drops the ones where nothing is at stake. It is bounded by a batch cap and a
+time budget, both inside the route's `maxDuration`, and it resumes:
+`shipments.last_reconciled_at` is the cursor, and a run that stops early leaves
+the rest for the next one. The client backs off on 429s and 5xxs and gives up
+rather than hammering.
 
 ### Shopify
 
@@ -256,23 +269,45 @@ for the morning — the call task attached to the last warning does not.
 | Job | When (Madrid) | Does |
 |---|---|---|
 | `escalation-tick` | every 30 min | fires whatever rung is due |
-| `push-drain` | every minute | turns staged Correos payloads into events |
-| `reconcile` | every 2 hours | trackpub sweep — the safety net for push |
-| `stale-detector` | 07:30 | flags anything silent over the configured window |
-| `daily-digest` | 08:00 | emails what to do today, in order |
+| `reconcile` | every 3 hours | trackpub sweep, 100 codes a request, urgent parcels first |
+| `push-drain` | every 5 min | turns staged Correos payloads into events |
 | `push-heartbeat` | hourly | no events in working hours means it broke |
 | `shopify-backfill` | hourly | fulfilments whose webhook never arrived |
-| `import-reminder` | 09:00 | nudges if TikTok has not been uploaded |
+| `stale-detector` | from 07:30 | flags anything silent over the configured window |
+| `daily-digest` | from 08:00 | emails what to do today, in order |
+| `import-reminder` | from 09:00 | nudges if TikTok has not been uploaded |
 | `postcode-stats` | nightly | rebuilds the failure rates behind the warning |
-| `housekeeping` | nightly | expired sessions, old rate limits, old payloads |
+| `housekeeping` | nightly | expired sessions, old rate limits, old payloads, old job runs |
+
+Push is not configured, so `reconcile` is not a safety net — it is the only way
+an event arrives. `push-drain` and `push-heartbeat` skip immediately until it
+is; the heartbeat in particular would otherwise raise a false alarm every
+working hour.
+
+"From 07:30" means hourly with a catch-up check, not at 07:30 exactly: the first
+invocation past the hour in Madrid does the work and the rest of the day's find
+it already done. Vercel never retries, so a job pinned to one invocation is a
+job that silently does not happen on the day that invocation is dropped.
 
 In production each of these is a route under `app/api/cron/`, scheduled by
 `vercel.json` and authenticated with `CRON_SECRET` — every one returns 401
-without it. Locally the same functions run under `npm run worker`. The job code
-is identical either way; see [docs/cron.md](docs/cron.md) for the UTC-to-Madrid
-handling.
+without it. **You set `CRON_SECRET` by hand; Vercel does not generate it.**
+Locally the same functions run under `npm run worker`. The job code is identical
+either way; see [docs/cron.md](docs/cron.md) for the UTC-to-Madrid handling, the
+per-job lock and the catch-up rule.
 
-Every one is idempotent — assume it will run twice, because it will.
+Every one is idempotent — assume it will run twice, because it will. Each takes
+a lease in `job_locks` first, and every message, task and alert it could create
+is unique in the database, so two overlapping runs cannot double-send even with
+the lock bypassed.
+
+**If nothing is running, every screen says so.** A missing or wrong
+`CRON_SECRET` makes every cron route answer 401 while the dashboard carries on
+showing countdowns that nothing is counting down — the one failure here that is
+invisible from the inside. So when no job has succeeded in 45 minutes, a banner
+appears on every panel screen, it distinguishes "nothing has ever run" from
+"stopped at *time*", and it is not dismissible. Settings → Connections breaks it
+down per job: when each was last heard from, and when each last did something.
 
 ```bash
 npm run job daily-digest                # locally
@@ -305,9 +340,17 @@ The app runs with four variables: `DATABASE_URL`, `SESSION_SECRET`,
 `CRON_SECRET` and `APP_URL`. No Correos, no Shopify, no WhatsApp.
 
 A missing integration disables itself and says so on the Settings screen, in
-terms of what it costs — *"the two-hourly sweep does nothing, and it is the only
-thing that repairs an update Correos dropped"* — with the variables still to set
-underneath. The jobs that need one report that they skipped. Nothing crashes,
+terms of what it costs — *"the sweep does nothing, and it is the only way an
+event reaches us at all"* — with the variables still to set underneath. The jobs
+that need one report that they skipped.
+
+Trackpub needs four variables from two different Correos systems — the gateway
+pair `CORREOS_CLIENT_ID` / `CORREOS_CLIENT_SECRET` from the developer-portal
+app, and `CORREOS_OAUTH_CLIENT_ID` / `CORREOS_OAUTH_CLIENT_SECRET` from the
+CorreosID system-user application — so Settings calls it ready only when all
+four are set, and **Test Correos connection** on that screen checks them in two
+steps: mint a token (it reports how many minutes it lasts, never the token
+itself), then look up a tracking code you type in. Nothing crashes,
 because none of those credentials exist on day one and somebody still has to be
 able to log in and learn the screens.
 

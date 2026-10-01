@@ -136,7 +136,7 @@ export default async function ParcelPage({ params }: { params: { id: string } })
                 when: human(e.occurredAt, at),
                 time: exact(e.occurredAt).split(', ')[1] ?? '',
                 exact: exact(e.occurredAt),
-                source: e.source === 'poll' ? 'Found in nightly check' : 'Live from Correos',
+                source: e.source === 'poll' ? 'Found when we asked Correos' : 'Live from Correos',
                 first: i === 0,
               }))}
               tone={tone}

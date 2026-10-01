@@ -5,4 +5,4 @@ export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 export const maxDuration = 120;
 
-export const GET = cronRoute('postcode-stats', rebuildPostcodeStats);
+export const GET = cronRoute('postcode-stats', rebuildPostcodeStats, { maxDurationSeconds: 120 });

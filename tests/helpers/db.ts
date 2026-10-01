@@ -34,7 +34,7 @@ export async function resetDb(): Promise<void> {
       correos_push_inbox, event_review_queue, activity,
       shipments, orders, offices, stores, import_batches,
       product_rules, postcode_stats, settings, job_runs,
-      sessions, users, action_rate_limit
+      sessions, users, action_rate_limit, job_locks, alerts
     RESTART IDENTITY CASCADE
   `;
 }

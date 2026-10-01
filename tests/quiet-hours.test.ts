@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterAll } from 'vitest';
-import { and, eq } from 'drizzle-orm';
+import { and, asc, eq } from 'drizzle-orm';
 import { getDb } from '@/db';
 import { activity, notifications, tasks } from '@/db/schema';
 import { TestClock, resetClock } from '@/lib/clock';
@@ -30,7 +30,9 @@ afterAll(async () => {
   await closeDb();
 });
 
-const msgs = (id: string) => getDb().select().from(notifications).where(eq(notifications.shipmentId, id));
+const msgs = (id: string) => getDb().select().from(notifications)
+  .where(eq(notifications.shipmentId, id))
+  .orderBy(asc(notifications.createdAt), asc(notifications.rungDueAt));
 const openTasks = (id: string) =>
   getDb().select().from(tasks).where(and(eq(tasks.shipmentId, id), eq(tasks.status, 'open')));
 

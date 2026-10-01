@@ -35,14 +35,24 @@ export interface Mail {
   to?: string;
 }
 
-export async function sendInternalAlert(mail: Mail): Promise<void> {
+/**
+ * `sent`   — it left the building.
+ * `logged` — no SMTP is configured, so it went to stdout. That is the correct
+ *            behaviour on a fresh checkout and on every dev machine, and it
+ *            must NOT be treated as a failure: a daily job that threw because
+ *            there is no mail server would fail all day, every day, locally.
+ * `failed` — SMTP is configured and refused it. The caller should care.
+ */
+export type MailOutcome = 'sent' | 'logged' | 'failed';
+
+export async function sendInternalAlert(mail: Mail): Promise<MailOutcome> {
   const to = mail.to ?? process.env.MAIL_TO;
   const body = mail.lines.join('\n');
 
   const t = mailer();
   if (!t || !to) {
     console.log(`[mail] ${mail.subject}\n${body}\n`);
-    return;
+    return 'logged';
   }
 
   try {
@@ -52,9 +62,13 @@ export async function sendInternalAlert(mail: Mail): Promise<void> {
       subject: mail.subject,
       text: body,
     });
+    return 'sent';
   } catch (err) {
-    // Never let a mail failure stop the thing that triggered it.
+    // Never let a mail failure stop the thing that triggered it — but do say
+    // so, because a digest that records success on a morning when no email
+    // left is a digest nobody gets and nobody misses.
     console.error('[mail] failed to send:', err instanceof Error ? err.message : err);
+    return 'failed';
   }
 }
 

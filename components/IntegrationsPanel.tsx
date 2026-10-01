@@ -1,5 +1,6 @@
 import type { Integration } from '@/lib/integrations';
 import { Card, Chip } from './ui';
+import { CorreosTest } from './CorreosTest';
 
 /**
  * What is connected, and what is not.
@@ -10,7 +11,12 @@ import { Card, Chip } from './ui';
  * else. The variable names are there too, because somebody has to paste them
  * into Vercel, but they are the footnote rather than the message.
  */
-export function IntegrationsPanel({ integrations }: { integrations: Integration[] }) {
+export function IntegrationsPanel({
+  integrations, batchMode,
+}: {
+  integrations: Integration[];
+  batchMode: 'unknown' | 'comma' | 'single';
+}) {
   const notReady = integrations.filter((i) => i.status !== 'ready').length;
 
   return (
@@ -20,6 +26,8 @@ export function IntegrationsPanel({ integrations }: { integrations: Integration[
         ? `${notReady} still to set up — the rest of the app works without ${notReady === 1 ? 'it' : 'them'}`
         : 'everything is connected'}
     >
+      <CorreosTest batchMode={batchMode} />
+
       {integrations.map((i) => (
         <div key={i.key} className="border-b border-line px-[14px] py-3 last:border-b-0">
           <div className="flex flex-wrap items-center gap-2">

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterAll } from 'vitest';
-import { eq } from 'drizzle-orm';
+import { asc, eq } from 'drizzle-orm';
 import { getDb } from '@/db';
 import { eventReviewQueue, notifications, shipmentEvents, shipments, tasks } from '@/db/schema';
 import { TestClock, resetClock } from '@/lib/clock';
@@ -13,7 +13,7 @@ import { correosPush, makeShipment } from './helpers/fixtures';
 /**
  * The thing that makes push and polling able to coexist.
  *
- * Without it, every nightly sweep would re-fire the whole escalation ladder at
+ * Without it, every reconcile sweep would re-fire the whole escalation ladder at
  * customers who already heard from us — which is not a bug you find in
  * staging, it is a bug you find when somebody gets six identical WhatsApps.
  */
@@ -33,7 +33,9 @@ afterAll(async () => {
 });
 
 const events = (id: string) => getDb().select().from(shipmentEvents).where(eq(shipmentEvents.shipmentId, id));
-const msgs = (id: string) => getDb().select().from(notifications).where(eq(notifications.shipmentId, id));
+const msgs = (id: string) => getDb().select().from(notifications)
+  .where(eq(notifications.shipmentId, id))
+  .orderBy(asc(notifications.createdAt), asc(notifications.rungDueAt));
 
 describe('the same event arriving twice changes nothing the second time', () => {
   it('stores one row and sends one message however many times it is replayed', async () => {
@@ -79,7 +81,7 @@ describe('the same event arriving twice changes nothing the second time', () => 
     });
     await runShipment(f.shipmentId, clock.now());
 
-    // The nightly sweep finds the same event. Different source, same event.
+    // The reconcile sweep finds the same event. Different source, same event.
     const polled = await ingestEvent({
       shippingCode: f.shippingCode,
       eventCode: 'E-1130',
@@ -122,7 +124,7 @@ describe('the same event arriving twice changes nothing the second time', () => 
     expect(await events(f.shipmentId)).toHaveLength(5);
     expect(afterFirst).toBeGreaterThan(0);
 
-    // The nightly reconcile pulls the same five events, three nights running.
+    // The reconcile sweep pulls the same five events, three runs in a row.
     await ingestAll('poll');
     await ingestAll('poll');
     await ingestAll('poll');

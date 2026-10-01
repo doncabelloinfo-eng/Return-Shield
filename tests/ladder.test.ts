@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterAll } from 'vitest';
-import { and, eq } from 'drizzle-orm';
+import { and, asc, eq } from 'drizzle-orm';
 import { getDb } from '@/db';
 import { escalationFires, notifications, shipments, tasks } from '@/db/schema';
 import { TestClock, resetClock, DAY, HOUR, MINUTE } from '@/lib/clock';
@@ -53,8 +53,19 @@ async function push(shippingCode: string, desc: string, at: Date, office?: strin
 const openTasks = (id: string) =>
   getDb().select().from(tasks).where(and(eq(tasks.shipmentId, id), eq(tasks.status, 'open')));
 
+/**
+ * Messages in the order the ladder wrote them.
+ *
+ * The ORDER BY is not decoration: without it Postgres is free to hand back the
+ * rows in any order, and a test that asserts the sequence of the ladder would
+ * then pass or fail on heap layout. The test clock is frozen within one tick,
+ * so `created_at` ties and the rung's due moment breaks it — which is exactly
+ * the order the rungs fired in.
+ */
 const sentMessages = (id: string) =>
-  getDb().select().from(notifications).where(eq(notifications.shipmentId, id));
+  getDb().select().from(notifications)
+    .where(eq(notifications.shipmentId, id))
+    .orderBy(asc(notifications.createdAt), asc(notifications.rungDueAt));
 
 describe('the ladder, from a failed delivery to a return', () => {
   it('walks every rung in order, on the day each is due', async () => {

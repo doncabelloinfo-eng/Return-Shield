@@ -1,4 +1,4 @@
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, sql as raw } from 'drizzle-orm';
 import { getDb } from '@/db';
 import { tasks } from '@/db/schema';
 import { now } from '@/lib/clock';
@@ -30,11 +30,7 @@ export interface OpenTaskSpec {
  * every tick that finds the same work still outstanding.
  */
 export async function openTask(spec: OpenTaskSpec): Promise<'opened' | 'refreshed'> {
-  const before = await getDb().select({ id: tasks.id }).from(tasks)
-    .where(and(eq(tasks.shipmentId, spec.shipmentId), eq(tasks.type, spec.type), eq(tasks.status, 'open')))
-    .limit(1);
-
-  await getDb().insert(tasks)
+  const [row] = await getDb().insert(tasks)
     .values({
       shipmentId: spec.shipmentId,
       type: spec.type,
@@ -51,9 +47,19 @@ export async function openTask(spec: OpenTaskSpec): Promise<'opened' | 'refreshe
       // The newest reason for the task wins: "no answer yesterday" replaces
       // "a day since nobody was home" rather than sitting alongside it.
       set: { reason: spec.reason, label: spec.label, dueAt: spec.dueAt ?? null },
-    });
+    })
+    // `xmax = 0` is true only for a row this statement INSERTed; an upsert that
+    // took the UPDATE path leaves the previous transaction's id there. It is
+    // the only way to learn which path a single upsert took.
+    //
+    // This used to be a SELECT taken before the write, which under concurrency
+    // meant two runs could both read "nothing open" and both report that they
+    // had opened it. The index already stopped the duplicate ROW; what it could
+    // not stop was two runs each announcing it in the activity feed and each
+    // counting it in the job's tally.
+    .returning({ fresh: raw<boolean>`(xmax = 0)` });
 
-  return before.length ? 'refreshed' : 'opened';
+  return row?.fresh ? 'opened' : 'refreshed';
 }
 
 /** Close every open task of the given types. No types means all of them. */

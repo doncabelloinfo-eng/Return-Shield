@@ -5,4 +5,4 @@ export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 export const maxDuration = 30;
 
-export const GET = cronRoute('import-reminder', importReminder, { onlyAtMadridHour: 9 });
+export const GET = cronRoute('import-reminder', importReminder, { dailyAfterMadridHour: 9, maxDurationSeconds: 30 });
