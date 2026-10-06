@@ -1,5 +1,6 @@
-import { normalisePayload, type NormaliseOutcome } from './normalise';
+import { normalisePayload, type NormaliseOutcome, type ShipmentError } from './normalise';
 import { CorreosTokenProvider, correosToken } from './token';
+import { env, envOr } from '@/lib/env';
 
 /**
  * Asking Correos where a parcel is.
@@ -59,9 +60,39 @@ export interface TrackpubOptions {
   fetchImpl?: typeof fetch;
 }
 
+/**
+ * What one HTTP GET came back with.
+ *
+ * The failure half is `LookupResult`'s, by construction rather than by being
+ * written out again: it was written out again, the two drifted, and a
+ * `definitive` flag added to one of them was silently dropped by the other.
+ */
+type GetResult =
+  | { ok: true; body: unknown }
+  | Extract<LookupResult, { ok: false }>;
+
 export type LookupResult =
   | { ok: true; outcome: NormaliseOutcome; raw: unknown }
-  | { ok: false; status: number | null; error: string; retryable: boolean };
+  | {
+    ok: false;
+    status: number | null;
+    error: string;
+    /** Worth trying again shortly: a 429, a 5xx, a dropped connection. */
+    retryable: boolean;
+    /**
+     * Correos has given a final answer ABOUT THIS CODE, and the answer is bad.
+     * A 404, or an `error` block naming it. Asking again in three hours will
+     * say the same thing, so the sweep counts the parcel as checked.
+     *
+     * Deliberately not the same as `!retryable`, and this is the distinction
+     * that matters most in this file. A 401, a 403 and missing credentials are
+     * all non-retryable too — and they are about the ACCOUNT, not the parcel.
+     * Treating those as final would stamp every live parcel as freshly checked
+     * on the strength of an authentication failure, which is precisely the
+     * silent-stale-countdown failure the whole design is built to prevent.
+     */
+    definitive?: boolean;
+  };
 
 /**
  * `unknown` — we have not tried a batch yet and will probe.
@@ -112,7 +143,11 @@ export class TrackpubClient {
   private lastDiagnosis: string | null = null;
 
   constructor(opts: TrackpubOptions = {}) {
-    this.baseUrl = (opts.baseUrl ?? process.env.CORREOS_TRACKPUB_BASE_URL ?? DEFAULT_BASE).replace(/\/$/, '');
+    // `envOr`, not `??`: an empty CORREOS_TRACKPUB_BASE_URL made this `''`,
+    // every lookup fetched the bare path as a relative URL, and production
+    // answered "Failed to parse URL from /search/PK…" — which names no
+    // variable at all. See lib/env.ts.
+    this.baseUrl = (opts.baseUrl ?? envOr('CORREOS_TRACKPUB_BASE_URL', DEFAULT_BASE)).replace(/\/$/, '');
     this.explicitId = opts.clientId;
     this.explicitSecret = opts.clientSecret;
     this.minGapMs = 1000 / Math.max(0.1, opts.ratePerSecond ?? 2);
@@ -123,11 +158,11 @@ export class TrackpubClient {
   }
 
   private get clientId(): string {
-    return this.explicitId ?? process.env.CORREOS_CLIENT_ID ?? '';
+    return this.explicitId ?? env('CORREOS_CLIENT_ID') ?? '';
   }
 
   private get clientSecret(): string {
-    return this.explicitSecret ?? process.env.CORREOS_CLIENT_SECRET ?? '';
+    return this.explicitSecret ?? env('CORREOS_CLIENT_SECRET') ?? '';
   }
 
   /**
@@ -169,7 +204,15 @@ export class TrackpubClient {
     const res = await this.get(`/search/${encodeURIComponent(code)}`);
     if (!res.ok) return res;
 
-    return { ok: true, outcome: normalisePayload(res.body, 'poll'), raw: res.body };
+    const outcome = normalisePayload(res.body, 'poll');
+
+    // Correos reports a bad code inside a 200, in the shipment's own `error`
+    // block. Returning ok here would have the sweep stamp the parcel as
+    // freshly checked on the strength of an error message.
+    const failed = shipmentErrorFor(outcome, code);
+    if (failed) return failed;
+
+    return { ok: true, outcome, raw: res.body };
   }
 
   /* ----------------------------------------------------------------- batch */
@@ -253,7 +296,9 @@ export class TrackpubClient {
       // written off as unknown to Correos.
       if (res.status === 404 && proven) {
         for (const code of chunk) {
-          byCode.set(code, { ok: false, status: 404, error: NEVER_HEARD_OF_IT, retryable: false });
+          byCode.set(code, {
+            ok: false, status: 404, error: NEVER_HEARD_OF_IT, retryable: false, definitive: true,
+          });
         }
         return requests;
       }
@@ -292,9 +337,11 @@ export class TrackpubClient {
 
     // Keep what the batch did tell us, whatever we decide about the format.
     for (const code of chunk) {
-      if (covered.has(code)) {
-        byCode.set(code, { ok: true, outcome: forCode(outcome, code), raw: res.body });
-      }
+      if (!covered.has(code)) continue;
+      // Same as the single path: a code Correos answered with a non-zero
+      // codError was answered, so it is not re-asked, but it is not a result.
+      byCode.set(code, shipmentErrorFor(outcome, code)
+        ?? { ok: true, outcome: forCode(outcome, code), raw: res.body });
     }
 
     // More than half missing from a format we trust is a regression, not a
@@ -338,9 +385,7 @@ export class TrackpubClient {
    * One GET, with the token, the rate limit, the 429/5xx backoff, and exactly
    * one retry after a 401.
    */
-  private async get(path: string): Promise<
-    { ok: true; body: unknown } | { ok: false; status: number | null; error: string; retryable: boolean }
-  > {
+  private async get(path: string): Promise<GetResult> {
     const url = `${this.baseUrl}${path}`;
     let refreshedToken = false;
 
@@ -380,12 +425,20 @@ export class TrackpubClient {
           this.tokens.invalidate();
           continue;
         }
+        // Correos' own status and body, not our interpretation of them.
+        //
+        // This used to replace both with a guess that named
+        // CORREOS_OAUTH_CLIENT_ID. The real cause was the OAuth *scope*: a
+        // token minted with `AP3 LBS RCG` gets `401 {"error": "Invalid
+        // token."}` from trackpub, and the credentials were right all along.
+        // The guess cost a day of looking at the wrong variable, and their
+        // three-word body would have ended it immediately.
         return {
           ok: false,
           status: res.status,
-          error: res.status === 401
-            ? 'Correos rejected the token. Check CORREOS_OAUTH_CLIENT_ID / _SECRET, and that the portal app is approved.'
-            : 'Correos refused the request. Check CORREOS_CLIENT_ID / _SECRET and the trackpub contract.',
+          error: await describe(res, res.status === 401
+            ? 'the token was rejected — check CORREOS_OAUTH_SCOPE (trackpub wants TPB), then the OAuth credentials'
+            : 'the request was refused — check CORREOS_CLIENT_ID / _SECRET and the trackpub contract'),
           retryable: false,
         };
       }
@@ -404,18 +457,15 @@ export class TrackpubClient {
         continue;
       }
 
+      // The one non-2xx whose body is not surfaced, because we already know
+      // what it means and say it better than they do. The status still reaches
+      // the caller, so the test button shows `404` next to this.
       if (res.status === 404) {
-        return { ok: false, status: 404, error: NEVER_HEARD_OF_IT, retryable: false };
+        return { ok: false, status: 404, error: NEVER_HEARD_OF_IT, retryable: false, definitive: true };
       }
 
       if (!res.ok) {
-        const body = await res.text().catch(() => '');
-        return {
-          ok: false,
-          status: res.status,
-          error: `Correos returned ${res.status}${body ? `: ${body.slice(0, 200)}` : ''}`,
-          retryable: false,
-        };
+        return { ok: false, status: res.status, error: await describe(res), retryable: false };
       }
 
       const body = await res.json().catch(() => undefined);
@@ -463,6 +513,20 @@ export function chunksOf(codes: readonly string[]): string[][] {
   return out;
 }
 
+/**
+ * Correos' own words for a non-2xx answer: the status, their body trimmed, and
+ * a hint after it rather than instead of it.
+ *
+ * Reading the body can fail — a connection that dies mid-response — and that
+ * must not turn a diagnosable HTTP error into a thrown exception, so it
+ * degrades to the status alone.
+ */
+async function describe(res: Response, hint?: string): Promise<string> {
+  const body = (await res.text().catch(() => '')).trim();
+  const head = `Correos returned ${res.status}${body ? `: ${body.slice(0, 300)}` : ''}`;
+  return hint ? `${head} — ${hint}` : head;
+}
+
 /** The slice of a batch response that belongs to one parcel. */
 function forCode(outcome: NormaliseOutcome, code: string): NormaliseOutcome {
   return {
@@ -470,7 +534,36 @@ function forCode(outcome: NormaliseOutcome, code: string): NormaliseOutcome {
     // normalise.ts tags per-shipment problems `${code}: …`. Without the colon
     // a code also collects the problems of every code it is a prefix of.
     problems: outcome.problems.filter((p) => p.startsWith(`${code}:`)),
+    errors: outcome.errors.filter((e) => e.code === code),
     codesSeen: [code],
+  };
+}
+
+/**
+ * One code's `error` block, as a failed lookup.
+ *
+ * `codError` is Correos' own numbering and we have only ever seen 0. So the
+ * message leads with their `desError` and carries the number for the cases we
+ * have not met yet, and the result is non-retryable: whatever is wrong with
+ * the code will still be wrong in three hours.
+ */
+function shipmentErrorFor(outcome: NormaliseOutcome, code: string): LookupResult | null {
+  const failure: ShipmentError | undefined = outcome.errors.find((e) => e.code === code);
+  if (!failure) return null;
+
+  return {
+    ok: false,
+    // HTTP was fine; this came back inside a 200, and saying otherwise would
+    // send somebody looking at the gateway.
+    status: 200,
+    error: `Correos reported error ${failure.codError} for this code`
+      + `${failure.desError ? `: ${failure.desError}` : ''}`,
+    retryable: false,
+    // About this code, and it will not change. Without this the sweep would
+    // never stamp the parcel, so it would lead the queue for ever — and ten
+    // such codes would trip the "Correos is refusing requests" guard on every
+    // single run and stop the sweep before it reached anything else.
+    definitive: true,
   };
 }
 

@@ -1,4 +1,5 @@
 import nodemailer, { type Transporter } from 'nodemailer';
+import { envNumber, envOr } from '@/lib/env';
 
 /**
  * Internal email: the daily digest and the alerts that cannot wait for
@@ -20,8 +21,8 @@ function mailer(): Transporter | null {
 
   transport = nodemailer.createTransport({
     host,
-    port: Number(process.env.SMTP_PORT ?? 587),
-    secure: Number(process.env.SMTP_PORT ?? 587) === 465,
+    port: envNumber('SMTP_PORT', 587),
+    secure: envNumber('SMTP_PORT', 587) === 465,
     auth: process.env.SMTP_USER
       ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS ?? '' }
       : undefined,
@@ -57,7 +58,7 @@ export async function sendInternalAlert(mail: Mail): Promise<MailOutcome> {
 
   try {
     await t.sendMail({
-      from: process.env.MAIL_FROM ?? 'Return Shield <shield@localhost>',
+      from: envOr('MAIL_FROM', 'Return Shield <shield@localhost>'),
       to,
       subject: mail.subject,
       text: body,

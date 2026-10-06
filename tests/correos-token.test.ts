@@ -64,7 +64,11 @@ describe('asking CorreosID for a token', () => {
     expect(sent.get('grant_type')).toBe('client_credentials');
     expect(sent.get('client_id')).toBe('portal-id');
     expect(sent.get('client_secret')).toBe('portal-secret-value');
-    expect(sent.get('scope')).toBe('AP3 LBS RCG');
+    // TPB is trackpub's application code in CorreosID, confirmed by Correos
+    // support and by a working production token. The two open-source SDKs this
+    // was built from send `AP3 LBS RCG`, which mints a token perfectly happily
+    // and is then refused by trackpub with `401 {"error": "Invalid token."}`.
+    expect(sent.get('scope')).toBe('TPB');
     expect(calls[0].headers['Content-Type']).toBe('application/x-www-form-urlencoded');
   });
 

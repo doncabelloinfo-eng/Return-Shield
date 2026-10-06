@@ -3,7 +3,7 @@ import { getDb } from '@/db';
 import {
   escalationFires, eventReviewQueue, offices, orders, shipmentEvents, shipments,
 } from '@/db/schema';
-import { mapCorreosEvent } from '@/lib/carriers/correos/state-map';
+import { matchCorreosEvent } from '@/lib/carriers/correos/state-map';
 import type { ShipmentState } from '@/lib/state-machine/states';
 import { RETURN_STATES } from '@/lib/state-machine/states';
 import { now } from '@/lib/clock';
@@ -28,6 +28,13 @@ export interface IncomingEvent {
   shippingCode: string;
   eventCode: string;
   eventDesc: string;
+  /**
+   * Correos' coarse delivery phase, when they send one: "EN CAMINO" and so on.
+   * Used only as the state mapper's last resort, and never stored as a column
+   * of its own — it lives on the raw payload like everything else we do not
+   * yet read.
+   */
+  phase?: string | null;
   occurredAt: Date;
   source: 'push' | 'poll' | 'system';
   officeCode?: string | null;
@@ -54,8 +61,14 @@ export async function ingestEvent(ev: IncomingEvent): Promise<IngestResult> {
     return { status: 'unknown_shipment' };
   }
 
-  const mapped = mapCorreosEvent(ev.eventCode, ev.eventDesc);
-  if (mapped === null) await queueForReview(ev);
+  // Three signals, in order of how much they are worth: the event code, the
+  // Spanish wording, then the coarse phase. A match that only the phase found
+  // still goes to the review queue — it is enough to move the parcel along and
+  // not enough to claim we recognise the event, and collecting the codes we do
+  // not have is the entire job of that queue.
+  const match = matchCorreosEvent(ev.eventCode, ev.eventDesc, ev.phase);
+  const mapped = match?.state ?? null;
+  if (!match || match.via === 'phase') await queueForReview(ev);
 
   if (ev.officeCode) await upsertOffice(ev);
 

@@ -2,6 +2,7 @@ import { drizzle, type PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 import * as schema from './schema';
 import { connectionShape } from './connection';
+import { envNumber } from '@/lib/env';
 
 /**
  * The database client, built on first use and never at import time.
@@ -52,7 +53,7 @@ export function getSql(): postgres.Sql {
     // Serverless runs many short-lived instances against one database, so each
     // one holds a small pool and gives connections back quickly. A generous
     // pool per instance is how a Postgres runs out of connections at 9am.
-    max: Number(process.env.DB_POOL_MAX ?? (process.env.VERCEL ? 3 : 10)),
+    max: envNumber('DB_POOL_MAX', process.env.VERCEL ? 3 : 10),
     idle_timeout: 20,
     connect_timeout: 10,
     // Supabase's transaction pooler multiplexes connections across backends,

@@ -2,6 +2,7 @@ import { eq } from 'drizzle-orm';
 import { getDb } from '@/db';
 import { stores } from '@/db/schema';
 import { storeEnv } from '@/lib/carriers/shopify/verify';
+import { env, envOr, envSet } from '@/lib/env';
 
 /**
  * What is wired up, and what is not.
@@ -34,8 +35,7 @@ export async function integrationStatus(): Promise<Integration[]> {
 }
 
 function correosPush(): Integration {
-  const missing = ['CORREOS_PUSH_CLIENT_ID', 'CORREOS_PUSH_CLIENT_SECRET']
-    .filter((v) => !process.env[v]);
+  const missing = ['CORREOS_PUSH_CLIENT_ID', 'CORREOS_PUSH_CLIENT_SECRET'].filter((v) => !envSet(v));
 
   if (missing.length) {
     return {
@@ -85,9 +85,9 @@ function correosTrackpub(batchMode: string): Integration {
     'CORREOS_CLIENT_SECRET',
     'CORREOS_OAUTH_CLIENT_ID',
     'CORREOS_OAUTH_CLIENT_SECRET',
-  ].filter((v) => !process.env[v]);
+  ].filter((v) => !envSet(v));
 
-  const manualToken = Boolean(process.env.CORREOS_JWT);
+  const manualToken = envSet('CORREOS_JWT');
 
   if (missing.length) {
     // A hand-pasted token makes the sweep work without the OAuth pair, which is
@@ -177,7 +177,7 @@ async function shopify(): Promise<Integration> {
 }
 
 function whatsapp(): Integration {
-  const provider = (process.env.WHATSAPP_PROVIDER ?? 'none').toLowerCase();
+  const provider = envOr('WHATSAPP_PROVIDER', 'none').toLowerCase();
 
   if (provider === 'none' || provider === '') {
     return {
@@ -191,7 +191,7 @@ function whatsapp(): Integration {
   }
 
   const missing = ['WHATSAPP_API_URL', 'WHATSAPP_API_TOKEN', 'WHATSAPP_PHONE_NUMBER_ID']
-    .filter((v) => !process.env[v]);
+    .filter((v) => !envSet(v));
 
   return missing.length
     ? {

@@ -222,9 +222,10 @@ notice a dropped update, and a lost *"at office"* event would leave a countdown
 wrong on the one screen whose whole job is to be right about how many days are
 left.
 
-A token is minted by OAuth client-credentials against CorreosID and cached until
-its `exp` claim minus a minute; a 401 from trackpub drops it, fetches one more
-and retries once. Codes go up 100 to a request — the multi-parcel format is
+A token is minted by OAuth client-credentials against CorreosID, with
+`scope=TPB` — trackpub's own application code, and the single value that
+decides whether any of this works — and cached until its `exp` claim minus a
+minute; a 401 from trackpub drops it, fetches one more and retries once. Codes go up 100 to a request — the multi-parcel format is
 undocumented, so the client tries comma-separated first, checks that the answer
 actually covers what it asked about, and falls back to one request per code if
 it does not. Which mode is in use is on the Settings screen, with a lever to

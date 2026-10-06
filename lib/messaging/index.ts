@@ -1,6 +1,7 @@
 import type { MessageProvider } from './types';
 import { NoProvider } from './adapters/none';
 import { WhatsAppCloudProvider } from './adapters/whatsapp-cloud';
+import { envOr } from '@/lib/env';
 
 export * from './types';
 export * from './build-message';
@@ -14,7 +15,7 @@ let cached: MessageProvider | null = null;
 export function messageProvider(): MessageProvider {
   if (cached) return cached;
 
-  const kind = (process.env.WHATSAPP_PROVIDER ?? 'none').trim().toLowerCase();
+  const kind = envOr('WHATSAPP_PROVIDER', 'none').toLowerCase();
 
   if (kind === 'none' || kind === '') {
     cached = new NoProvider();

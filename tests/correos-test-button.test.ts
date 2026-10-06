@@ -13,6 +13,7 @@ const { CorreosTokenProvider, setCorreosToken, clearTokenCache } =
   await import('@/lib/carriers/correos/token');
 const { getSetting, setSetting } = await import('@/lib/settings');
 const { resetDb, closeDb } = await import('./helpers/db');
+const { REAL_SEARCH_RESPONSE, REAL_CODE, v2Shipment, v2Event } = await import('./helpers/correos');
 
 /**
  * The button exists because four variables from two different places have to be
@@ -224,6 +225,85 @@ describe('step 2: the lookup', () => {
     expect(result.lookup?.ok).toBe(true);
     expect(result.lookup?.events).toBe(1);
     expect(result.lookup?.message).toContain('no mapping for');
+  });
+});
+
+describe('what it says when Correos says no', () => {
+  it('shows their status and their body, not our guess at the cause', async () => {
+    // The whole reason this test exists: the action used to report
+    // "Correos rejected the token. Check CORREOS_OAUTH_CLIENT_ID…" on a 401.
+    // The credentials were right; the OAuth scope was wrong. Correos' own
+    // three-word body would have said so immediately.
+    stubNetwork([{ status: 401, body: { error: 'Invalid token.' } }]);
+
+    const result = await testCorreosConnection('PQX');
+
+    expect(result.token.ok).toBe(true);
+    expect(result.lookup?.ok).toBe(false);
+    expect(result.lookup?.status).toBe(401);
+    expect(result.lookup?.message).toContain('401');
+    expect(result.lookup?.message).toContain('Invalid token.');
+  });
+
+  it('mentions the scope on a 401, since that is what it turned out to be', async () => {
+    stubNetwork([{ status: 401, body: { error: 'Invalid token.' } }]);
+    const result = await testCorreosConnection('PQX');
+    // A hint after their body, never instead of it.
+    expect(result.lookup?.message).toContain('CORREOS_OAUTH_SCOPE');
+  });
+
+  it('shows the body on a 400 as well', async () => {
+    stubNetwork([{ status: 400, body: { error: 'JWT Token is required.' } }]);
+
+    const result = await testCorreosConnection('PQX');
+
+    expect(result.lookup?.status).toBe(400);
+    expect(result.lookup?.message).toContain('JWT Token is required.');
+  });
+
+  it('trims a body that goes on', async () => {
+    stubNetwork([{ status: 500, body: { error: 'x'.repeat(2000) } }]);
+
+    const result = await testCorreosConnection('PQX');
+
+    // Long enough to diagnose, short enough to put on a screen.
+    expect((result.lookup?.message ?? '').length).toBeLessThan(500);
+  });
+});
+
+describe('what it says when the lookup works', () => {
+  it('reports the event count, the newest event with its time, and the state', async () => {
+    stubNetwork([{ body: REAL_SEARCH_RESPONSE }]);
+
+    const result = await testCorreosConnection(REAL_CODE);
+
+    expect(result.lookup?.ok).toBe(true);
+    expect(result.lookup?.events).toBe(3);
+    // The newest of the three is "Clasificado" at 20:13:43 Madrid.
+    expect(result.lookup?.latestEvent).toContain('Clasificado');
+    expect(result.lookup?.latestEvent).toContain('20:13');
+    expect(result.lookup?.latestEvent).toContain('6 Oct');
+    expect(result.lookup?.state).toBe('On the way');
+    expect(result.lookup?.message).toBe('3 events.');
+  });
+
+  it('says so when only the phase recognised the newest event', async () => {
+    stubNetwork([{ body: [v2Shipment(REAL_CODE, [v2Event('ZZ999', 'Una cosa nueva', 'EN CAMINO')])] }]);
+
+    const result = await testCorreosConnection(REAL_CODE);
+
+    expect(result.lookup?.state).toBe('On the way');
+    expect(result.lookup?.message).toContain('phase');
+    expect(result.lookup?.message).toContain('review');
+  });
+
+  it('reports a per-shipment error rather than "no events yet"', async () => {
+    stubNetwork([{ body: [{ code: REAL_CODE, events: [], error: { codError: 1, desError: 'Envío no encontrado' } }] }]);
+
+    const result = await testCorreosConnection(REAL_CODE);
+
+    expect(result.lookup?.ok).toBe(false);
+    expect(result.lookup?.message).toContain('Envío no encontrado');
   });
 });
 

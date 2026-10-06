@@ -21,6 +21,7 @@ import { callQueue, money } from '@/lib/escalation/decide';
 import { loadRows, todayView } from '@/lib/views/rows';
 import { storeEnv } from '@/lib/carriers/shopify/verify';
 import { ingestShopifyOrder, type ShopifyOrderPayload } from '@/lib/carriers/shopify/ingest';
+import { envNumber, envOr } from '@/lib/env';
 
 /**
  * Every scheduled job.
@@ -221,8 +222,11 @@ export async function reconcile(opts: ReconcileOptions = {}): Promise<JobResult>
     return { detail: { skipped: 'Correos credentials are not configured' } };
   }
 
-  const batchSize = opts.batchSize ?? Number(process.env.RECONCILE_BATCH_SIZE ?? 6000);
-  const budgetMs = opts.budgetMs ?? Number(process.env.RECONCILE_BUDGET_MS ?? 240_000);
+  // `envNumber`, not `Number(… ?? default)`: `Number('')` is 0, so an empty
+  // RECONCILE_BATCH_SIZE would be a sweep that looks at no parcels at all and
+  // reports success. See lib/env.ts.
+  const batchSize = opts.batchSize ?? envNumber('RECONCILE_BATCH_SIZE', 6000);
+  const budgetMs = opts.budgetMs ?? envNumber('RECONCILE_BUDGET_MS', 240_000);
 
   // Two different clocks, deliberately. The budget measures how long this
   // invocation has actually been running, so it must be wall-clock — a demo or
@@ -295,9 +299,15 @@ export async function reconcile(opts: ReconcileOptions = {}): Promise<JobResult>
         continue;
       }
 
-      if (one.status === 404) {
-        // Correos has never heard of it. Asking again in three hours will not
-        // change that, so it counts as checked.
+      if (one.definitive) {
+        // Correos has given a final answer about this code and it is a bad
+        // one: never heard of it, or an `error` block naming it. Asking again
+        // in three hours will say the same thing, so it counts as checked.
+        //
+        // `definitive`, not `!retryable`: a 401 or a 403 is non-retryable and
+        // is about the account rather than the parcel, and stamping every live
+        // parcel as checked on the strength of an auth failure is the exact
+        // invisible failure this sweep exists to prevent.
         missing += 1;
         answered.push(code);
         continue;
@@ -719,5 +729,5 @@ export async function housekeeping(): Promise<JobResult> {
 }
 
 function appUrl(): string {
-  return (process.env.APP_URL ?? 'http://localhost:3000').replace(/\/$/, '');
+  return envOr('APP_URL', 'http://localhost:3000').replace(/\/$/, '');
 }

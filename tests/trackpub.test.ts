@@ -207,7 +207,11 @@ describe('the token, in use', () => {
     if (r.ok) return;
     expect(r.status).toBe(401);
     expect(r.retryable).toBe(false);
-    expect(r.error).toContain('CORREOS_OAUTH_CLIENT_ID');
+    // Correos' own status and body, which is the point: this used to report a
+    // guess naming CORREOS_OAUTH_CLIENT_ID, and when a real 401 arrived the
+    // credentials were right and the scope was wrong. A day went on that.
+    expect(r.error).toContain('401');
+    expect(r.error).toContain('{"error":"invalid"}');
     expect(seen).toHaveLength(2);
     expect(minted).toBe(2);
   });

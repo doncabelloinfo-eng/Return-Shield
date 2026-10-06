@@ -2,19 +2,25 @@
  * Getting a JWT for Correos' API gateway.
  *
  * trackpub needs three things on every call: the gateway's `client_id` and
- * `client_secret` from the developer-portal app, and a bearer token. The portal
- * does not document where that token comes from. Two independent open-source
- * SDKs — buzkall/laravel-correos and smart-dato/correos-shipping-sdk — both do
- * the same thing, so that is what this implements:
+ * `client_secret` from the developer-portal app, and a bearer token.
+ *
+ * CONFIRMED against production on 6 October:
  *
  *   POST https://apioauthcid.correos.es/Api/Authorize/Token
- *   form-encoded: grant_type=client_credentials, client_id, client_secret, scope
- *   → { idToken: "<jwt>" }
+ *   form-encoded: grant_type=client_credentials, client_id, client_secret,
+ *                 scope=TPB
+ *   → { idToken: "<jwt>", tokenType: "Bearer", expiresIn: 1800 }
  *
- * Treat that as the best evidence available rather than as documentation. The
- * URL, the scope and the field it reads are all overridable, so if Correos turn
- * out to do something slightly different it is a configuration change rather
- * than a code change. `CORREOS_OAUTH_RESPONSE_FIELD` exists for exactly that.
+ * The JWT carries `aud=TPB`, `iss=CID` and `oid=<CorreosID client id>`, and
+ * lasts thirty minutes.
+ *
+ * THE SCOPE IS `TPB`, and the scope is the whole thing. `TPB` is trackpub's
+ * application code in CorreosID; Correos support confirmed it. Two
+ * open-source SDKs use `AP3 LBS RCG`, which is what this file shipped with,
+ * and a token minted with that scope is issued perfectly happily and then
+ * rejected by trackpub with `401 {"error": "Invalid token."}`. Nothing about
+ * the failure points at the scope, which is why it cost a day. The URL, the
+ * scope and the field read are all still overridable by environment variable.
  *
  * NOTHING IN THIS FILE LOGS A TOKEN OR A SECRET. Not in an error message, not
  * in a debug line, not on a failure path. A token in a log is a token in
@@ -22,8 +28,16 @@
  * carrier account.
  */
 
+import { env, envOr } from '@/lib/env';
+
 const DEFAULT_TOKEN_URL = 'https://apioauthcid.correos.es/Api/Authorize/Token';
-const DEFAULT_SCOPE = 'AP3 LBS RCG';
+
+/**
+ * trackpub's application code in CorreosID. Confirmed by Correos support and
+ * by a working production token. Do not replace this with the `AP3 LBS RCG`
+ * the open-source SDKs use: that mints a token trackpub will not accept.
+ */
+const DEFAULT_SCOPE = 'TPB';
 
 /** Renew this long before `exp`, so an in-flight request cannot expire mid-call. */
 const RENEW_MARGIN_MS = 60_000;
@@ -77,10 +91,13 @@ export class CorreosTokenProvider {
   private inFlight: Promise<TokenResult> | null = null;
 
   constructor(opts: TokenOptions = {}) {
-    this.tokenUrl = opts.tokenUrl ?? process.env.CORREOS_TOKEN_URL ?? DEFAULT_TOKEN_URL;
-    this.scope = opts.scope ?? process.env.CORREOS_OAUTH_SCOPE ?? DEFAULT_SCOPE;
+    // `env`, not `??`, on every one of these: a variable added with no value
+    // is the empty string, not undefined, so `??` would hand us an empty token
+    // URL and an empty scope. See lib/env.ts.
+    this.tokenUrl = opts.tokenUrl ?? envOr('CORREOS_TOKEN_URL', DEFAULT_TOKEN_URL);
+    this.scope = opts.scope ?? envOr('CORREOS_OAUTH_SCOPE', DEFAULT_SCOPE);
     this.responseFields = opts.responseFields
-      ?? splitFields(process.env.CORREOS_OAUTH_RESPONSE_FIELD)
+      ?? splitFields(env('CORREOS_OAUTH_RESPONSE_FIELD'))
       ?? ['idToken', 'access_token'];
     this.fetchImpl = opts.fetchImpl ?? ((...args) => fetch(...args));
     this.staticTokenOverride = opts.staticToken;
@@ -89,16 +106,16 @@ export class CorreosTokenProvider {
   }
 
   private get clientId(): string {
-    return this.explicitId ?? process.env.CORREOS_OAUTH_CLIENT_ID ?? '';
+    return this.explicitId?.trim() ?? env('CORREOS_OAUTH_CLIENT_ID') ?? '';
   }
 
   private get clientSecret(): string {
-    return this.explicitSecret ?? process.env.CORREOS_OAUTH_CLIENT_SECRET ?? '';
+    return this.explicitSecret?.trim() ?? env('CORREOS_OAUTH_CLIENT_SECRET') ?? '';
   }
 
   /** A hand-supplied token, for testing against pre-production. */
   private get override(): string {
-    return (this.staticTokenOverride ?? process.env.CORREOS_JWT ?? '').trim();
+    return this.staticTokenOverride?.trim() ?? env('CORREOS_JWT') ?? '';
   }
 
   /** Can we mint a token at all? */

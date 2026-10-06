@@ -78,7 +78,7 @@ function stubTrackpub(answer: (code: string) => LookupResult, delayMs = 0, batch
 
 const emptyAnswer = (): LookupResult => ({
   ok: true,
-  outcome: { events: [], problems: [], codesSeen: [] },
+  outcome: { events: [], problems: [], errors: [], codesSeen: [] },
   raw: {},
 });
 
@@ -191,10 +191,16 @@ describe('the reconcile sweep', () => {
   });
 
   it('counts a parcel Correos has never heard of as checked', async () => {
-    // Asking again in two hours will not change the answer, and letting it sit
-    // at the front of the queue forever would starve everything behind it.
+    // Asking again in three hours will not change the answer, and letting it
+    // sit at the front of the queue forever would starve everything behind it.
+    //
+    // `definitive` is what the sweep reads, not the 404 itself. The real
+    // client sets it on every 404 — the flag exists because a 401 is also a
+    // non-retryable failure and must NOT be treated this way.
     await makeMany(2);
-    stubTrackpub(() => ({ ok: false, status: 404, error: 'unknown', retryable: false }));
+    stubTrackpub(() => ({
+      ok: false, status: 404, error: 'unknown', retryable: false, definitive: true,
+    }));
 
     await reconcile({ batchSize: 2 });
     expect(await stillToCheck()).toBe(0);
@@ -207,6 +213,7 @@ describe('the reconcile sweep', () => {
       raw: {},
       outcome: {
         problems: [],
+        errors: [],
         codesSeen: [f.shippingCode],
         events: [{
           shippingCode: f.shippingCode,
@@ -236,6 +243,7 @@ describe('the reconcile sweep', () => {
       raw: {},
       outcome: {
         problems: [],
+        errors: [],
         codesSeen: [f.shippingCode],
         events: [{
           shippingCode: f.shippingCode,
@@ -328,5 +336,71 @@ describe('the order parcels are swept in', () => {
     await reconcile({ batchSize: 100 });
 
     expect(asked).toEqual([]);
+  });
+});
+
+describe('a code Correos gives a final bad answer about', () => {
+  it('counts as checked, so it does not lead the queue for ever', async () => {
+    const codes = await makeMany(3);
+
+    // A per-shipment error block: HTTP 200, `codError` non-zero. The parcel
+    // will get the same answer in three hours and in three days.
+    stubTrackpub((code) => code === codes[1]
+      ? {
+        ok: false, status: 200, retryable: false, definitive: true,
+        error: 'Correos reported error 1 for this code: Envío no encontrado',
+      }
+      : emptyAnswer());
+
+    const result = await reconcile();
+
+    expect(await stillToCheck()).toBe(0);
+    expect(result.detail).toMatchObject({ missing: 1 });
+    expect(result.detail).not.toHaveProperty('stoppedEarly');
+  });
+
+  it('does not stop the sweep when ten of them turn up', async () => {
+    // The failure this guards. A definitive per-code error counted as a
+    // transport failure would trip the "Correos is refusing requests" guard on
+    // the eleventh parcel of EVERY run — and because those parcels are never
+    // stamped, they lead the queue for ever, so the sweep would stop before it
+    // reached any of the other five thousand. Tracking would stop dead while
+    // the alert blamed Correos.
+    const codes = await makeMany(15);
+    const bad = new Set(codes.slice(0, 12));
+
+    stubTrackpub((code) => bad.has(code)
+      ? { ok: false, status: 200, retryable: false, definitive: true, error: 'Correos reported error 1 for this code' }
+      : emptyAnswer());
+
+    const result = await reconcile();
+
+    expect(result.detail).toMatchObject({ asked: 15, missing: 12 });
+    expect(result.detail).not.toHaveProperty('stoppedEarly');
+    // Every one of them, including the good three behind the bad twelve.
+    expect(await stillToCheck()).toBe(0);
+  });
+
+  it('still stops on an account-level refusal, and stamps nothing', async () => {
+    // A 401 is non-retryable too, and is about the account rather than the
+    // parcel. Counting it as a final answer would stamp every live parcel as
+    // freshly checked on the strength of an authentication failure — the exact
+    // silent-stale-countdown failure this sweep exists to prevent.
+    await makeMany(15);
+
+    stubTrackpub(() => ({
+      ok: false,
+      status: 401,
+      retryable: false,
+      error: 'Correos returned 401: {"error": "Invalid token."}',
+    }));
+
+    const result = await reconcile();
+
+    expect(result.detail).toMatchObject({ missing: 0 });
+    expect(String((result.detail as { stoppedEarly?: string }).stoppedEarly))
+      .toContain('refusing requests');
+    // Nothing was learnt, so nothing is stamped and the next run retries them.
+    expect(await stillToCheck()).toBe(15);
   });
 });

@@ -9,6 +9,7 @@ import { liveShipmentIds } from '@/lib/shipments/repo';
 import { setSetting } from '@/lib/settings';
 import { DAY, HOUR } from '@/lib/clock';
 import { madridMidnightUtc, madridParts } from '@/lib/time';
+import { env, envOr } from '@/lib/env';
 
 /**
  * Seeds an account and, with DEMO_MODE=1, a realistic set of parcels part-way
@@ -131,7 +132,7 @@ const PARCELS: SeedParcel[] = [
  * needed and missing, this fails and says so.
  */
 async function seedUser(): Promise<void> {
-  const email = (process.env.SEED_EMAIL ?? '').trim().toLowerCase();
+  const email = (env('SEED_EMAIL') ?? '').toLowerCase();
   if (!email) {
     throw new Error('SEED_EMAIL is not set. Set SEED_EMAIL, SEED_PASSWORD and SEED_NAME.');
   }
@@ -146,7 +147,7 @@ async function seedUser(): Promise<void> {
     return;
   }
 
-  const password = process.env.SEED_PASSWORD ?? '';
+  const password = env('SEED_PASSWORD') ?? '';
   if (!password) {
     throw new Error(
       'SEED_PASSWORD is not set and the user does not exist yet, so there is no password '
@@ -159,7 +160,7 @@ async function seedUser(): Promise<void> {
 
   await getDb().insert(users).values({
     email,
-    name: process.env.SEED_NAME ?? 'Operator',
+    name: envOr('SEED_NAME', 'Operator'),
     passwordHash: await hashPassword(password),
   }).onConflictDoNothing();
 

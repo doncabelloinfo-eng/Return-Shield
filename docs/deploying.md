@@ -68,7 +68,7 @@ jobs and there is nothing to choose.
 | `CORREOS_CLIENT_SECRET` | As above, the matching header. |
 | `CORREOS_OAUTH_CLIENT_ID` | No token can be minted, so every lookup is unauthorised. The **CorreosID system-user application** credential — a different app in a different place from the two above. |
 | `CORREOS_OAUTH_CLIENT_SECRET` | As above. |
-| `CORREOS_OAUTH_SCOPE` | Optional. Defaults to `AP3 LBS RCG`. |
+| `CORREOS_OAUTH_SCOPE` | Optional, and defaults to the right thing (`TPB`). See below before changing it. |
 | `CORREOS_TOKEN_URL` | Optional. Defaults to production. Pre-production is `apioauthcid.correospre.es`. |
 | `CORREOS_TRACKPUB_BASE_URL` | Optional. Point at `api1.correospre.es` or a mock to test without live credentials. |
 | `CORREOS_JWT` | **Optional, for testing only.** A token pasted in by hand. It bypasses the token endpoint and is used as-is until it expires, which it does in about thirty minutes — so it is not something to configure in production, and Settings reports an integration running on one as *partial* rather than ready. |
@@ -82,7 +82,40 @@ the screen said everything was fine.
 Once they are set, press **Test Correos connection** on Settings → Connections.
 It mints a token (telling you how many minutes it lasts, never what it is) and
 then looks up a tracking code you type in, so a wrong value is attributable to
-the step it broke rather than to a `job_runs` row three hours later.
+the step it broke rather than to a `job_runs` row three hours later. On any
+non-2xx answer it shows Correos' own status and body, which is the only thing
+that reliably says what is wrong.
+
+### The OAuth scope is `TPB`
+
+`TPB` is trackpub's application code in CorreosID. Correos support confirmed
+it, and a working production token carries `aud=TPB`, `iss=CID` and
+`oid=<CorreosID client id>`, lasting thirty minutes.
+
+This is worth a paragraph because of how it fails. The two open-source Correos
+SDKs send `scope=AP3 LBS RCG`, which is what this app shipped with. CorreosID
+issues a token for that scope without complaint; trackpub then rejects every
+call with `401 {"error": "Invalid token."}`. Nothing in the failure mentions a
+scope, and the obvious reading — bad credentials — is wrong. It cost a day.
+
+| What you get | What it means |
+|---|---|
+| `401 {"error": "Invalid token."}` | The token is real but minted for the wrong scope. Check `CORREOS_OAUTH_SCOPE` first, the OAuth credentials second. |
+| `400 {"error": "JWT Token is required."}` | No bearer token reached them at all. |
+| `403` | The token is fine and the gateway is not: check `CORREOS_CLIENT_ID` / `_SECRET` and that the portal app's trackpub contract is approved. |
+
+### Empty is unset
+
+Every variable this app reads treats an empty or whitespace-only value as not
+configured, and credentials are trimmed before use. `process.env.X ?? default`
+does not do that — `??` only fires on `undefined`, and a key added through the
+Vercel UI with the value left blank is the empty string.
+
+That is not hypothetical either: `CORREOS_TRACKPUB_BASE_URL` was added with no
+value, the base URL became `''`, every lookup fetched the bare path as a
+relative URL, and production answered `Failed to parse URL from /search/PK…`.
+So it is safe to add a key and leave it blank — you get the default. See
+`lib/env.ts`.
 
 ### Shopify — per store, optional
 

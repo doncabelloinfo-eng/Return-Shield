@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { getDb } from '@/db';
 import { correosPushInbox } from '@/db/schema';
 import { now } from '@/lib/clock';
+import { envOr } from '@/lib/env';
 
 // Per-request, behind a login or a signed token, and it reads the database.
 // Saying so explicitly keeps it out of the build's static render pass, which
@@ -48,7 +49,7 @@ function authorised(req: Request): { ok: true } | { ok: false; why: string } {
     return { ok: false, why: 'bad credentials' };
   }
 
-  const allowed = (process.env.CORREOS_PUSH_ALLOWED_IPS ?? '')
+  const allowed = envOr('CORREOS_PUSH_ALLOWED_IPS', '')
     .split(',').map((s) => s.trim()).filter(Boolean);
 
   if (allowed.length) {

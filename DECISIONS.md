@@ -158,9 +158,20 @@ The developer portal does not say where the JWT comes from. Two open-source
 SDKs independently do the same thing, so that is what this does — OAuth
 client-credentials against CorreosID, `idToken` with `access_token` as a
 fallback, cached until `exp` minus a minute, 25 minutes assumed if there is no
-`exp`. It is the best evidence available, not documentation, so the response
-field is configurable and a hand-pasted `CORREOS_JWT` still works for testing.
-Nothing logs the token, at any level, ever.
+`exp`. The response field is configurable and a hand-pasted `CORREOS_JWT` still
+works for testing. Nothing logs the token, at any level, ever.
+
+**The scope is `TPB`, and the SDKs were wrong about it.** They send
+`AP3 LBS RCG`; CorreosID issues a token for that scope without complaint and
+trackpub then rejects every call with `401 {"error": "Invalid token."}`. The
+real answer came from Correos support: `TPB` is trackpub's application code in
+CorreosID, and a working token carries `aud=TPB`, `iss=CID` and `oid=<client
+id>`. The lesson is not about the scope, which is now a constant with a comment
+on it. It is that this app told the operator "check
+CORREOS_OAUTH_CLIENT_ID" — our guess — where Correos had said "Invalid token."
+Everything in that exchange was pointing at the wrong variable, and it cost a
+day. Every non-2xx answer now carries their status and their body, and the hint
+comes after it rather than instead of it.
 
 The multi-parcel format is genuinely undocumented: the manual says 100 codes a
 request and does not say how to write them. So the client tries
@@ -175,6 +186,43 @@ when batching works, and it would cost 5,000 when a single odd answer
 downgraded it wrongly. So a zero-coverage answer only downgrades a format that
 has never been **proven**, and there is a lever on the Settings screen to make
 it probe again.
+
+### The response shape was nothing like the push feed's
+
+trackpub v2 answers `/search` with `code`, `events[]`, `summaryText` and
+`eventHours`. This app was reading `codEnvio`, `eventos[]`, `desEvento` and
+`horEvento`, which is what the Track&TracePush body uses. Both feeds are still
+read, because both exist.
+
+The failure was the interesting part: a token that worked, HTTP 200, and a
+Settings screen reporting *"Correos knows the code but has no events for it
+yet"* about a parcel with three events. Nothing was an error anywhere. Left
+alone, every parcel would have sat in `created` until its deposit window ran
+out, and the dashboard would have looked fine the whole time. A parse that
+returns zero events needs to be as loud as a parse that throws — which is why
+the fixture in `tests/helpers/correos.ts` is a verbatim capture, nulls
+included, rather than a payload written to match the parser.
+
+Three event codes are now confirmed from that traffic and keyed in `BY_CODE`;
+everything else still matches on the Spanish wording. Correos' coarse
+`phaseDes` is a third fallback below both, and an event rescued by its phase is
+still queued for review: the phase keeps the parcel moving, and it is not a
+claim that we understand the event.
+
+### Empty is unset
+
+`process.env.X ?? default` reads as "use the default when X is not configured"
+and does not do that: `??` fires on `undefined`, and a key added through a
+hosting dashboard with the value left blank is the empty string. Every read now
+goes through `lib/env.ts`, which treats blank and whitespace as absent and
+trims what it returns.
+
+Two of these were live. `CORREOS_TRACKPUB_BASE_URL` was added with no value, so
+every lookup fetched a relative URL and production said `Failed to parse URL
+from /search/PK…` — naming no variable. And `Number(process.env.X ?? 6000)` is
+worse than it looks, because `Number('')` is 0: a blank
+`RECONCILE_BATCH_SIZE` would have been a sweep that checked no parcels and
+reported success.
 
 ---
 

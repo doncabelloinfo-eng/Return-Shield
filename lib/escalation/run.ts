@@ -14,6 +14,7 @@ import { markFired, scheduleExtra } from './silence';
 import { openTask } from './tasks';
 import { mintActionToken } from '@/lib/action-token';
 import { daysLeft } from '@/lib/time';
+import { envOr } from '@/lib/env';
 
 /**
  * The part that actually does things. Everything it decides comes from the
@@ -400,7 +401,7 @@ async function messageContextFor(shipmentId: string): Promise<MessageContextRow 
 }
 
 function appUrl(): string {
-  return (process.env.APP_URL ?? 'http://localhost:3000').replace(/\/$/, '');
+  return envOr('APP_URL', 'http://localhost:3000').replace(/\/$/, '');
 }
 
 export { nextSendingSlot };

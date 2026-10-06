@@ -4,7 +4,7 @@ import { requireUser } from '@/lib/auth/guard';
 import { correosToken } from '@/lib/carriers/correos/token';
 import { TrackpubClient } from '@/lib/carriers/correos/trackpub';
 import { getSetting, setSetting } from '@/lib/settings';
-import { STATE_LABEL, mapCorreosEvent } from '@/lib/carriers/correos/state-map';
+import { STATE_LABEL, matchCorreosEvent } from '@/lib/carriers/correos/state-map';
 import { exact } from '@/lib/time';
 
 /**
@@ -117,7 +117,8 @@ export async function testCorreosConnection(shippingCode: string): Promise<Corre
   const events = result.outcome.events;
   // Newest first, the way the parcel page shows them.
   const newest = [...events].sort((a, b) => b.occurredAt.getTime() - a.occurredAt.getTime())[0];
-  const mapped = newest ? mapCorreosEvent(newest.eventCode, newest.eventDesc) : null;
+  const match = newest ? matchCorreosEvent(newest.eventCode, newest.eventDesc, newest.phase) : null;
+  const mapped = match?.state ?? null;
 
   return {
     token: tokenCheck,
@@ -126,15 +127,21 @@ export async function testCorreosConnection(shippingCode: string): Promise<Corre
       code,
       events: events.length,
       state: mapped ? (STATE_LABEL[mapped] ?? mapped) : undefined,
+      // The newest event in Correos' own words, with its date and time, so the
+      // operator can check it against what Mi Oficina shows them.
       latestEvent: newest
         ? `"${newest.eventDesc}" at ${exact(newest.occurredAt)}`
+          + `${newest.phase ? ` · ${newest.phase}` : ''}`
         : undefined,
       message: events.length === 0
         ? 'Correos knows the code but has no events for it yet.'
         : mapped === null
           ? `${events.length} events. The newest one is wording we have no mapping for — it is `
             + 'kept, shown on the parcel, and listed below for review.'
-          : `${events.length} events.`,
+          : match?.via === 'phase'
+            ? `${events.length} events. The newest one we only recognise from its phase `
+              + `(${newest?.phase}), so it is listed below for review as well.`
+            : `${events.length} events.`,
     },
     batchMode: client.mode,
     batchNote: client.diagnosis,
