@@ -7,7 +7,11 @@ import { JobRunsPanel } from '@/components/JobRunsPanel';
 import { integrationStatus } from '@/lib/integrations';
 import { jobHealth } from '@/lib/engine-health';
 import { getSetting } from '@/lib/settings';
-import { Card, PageHeading } from '@/components/ui';
+import { Card, PageHeading, Bilingual } from '@/components/ui';
+import { StoragePanel } from '@/components/StoragePanel';
+import { databaseBytes } from '@/lib/cleanup';
+import { retentionDays } from '@/lib/retention';
+import { eventLabels } from '@/lib/carriers/correos/state-map';
 
 // Per-request, behind a login or a signed token, and it reads the database.
 // Saying so explicitly keeps it out of the build's static render pass, which
@@ -22,7 +26,7 @@ export const runtime = 'nodejs';
  * office list re-sorts straight away.
  */
 export default async function SettingsPage() {
-  const [rules, counts, watched, review, integrations, jobs, batchMode] = await Promise.all([
+  const [rules, counts, watched, review, integrations, jobs, batchMode, bytes] = await Promise.all([
     getDb().select().from(productRules).orderBy(productRules.productCode),
     getDb().select({ code: shipments.productCode, n: raw<number>`count(*)::int` })
       .from(shipments).groupBy(shipments.productCode),
@@ -33,7 +37,10 @@ export default async function SettingsPage() {
     integrationStatus(),
     jobHealth(),
     getSetting('correosBatchMode'),
+    databaseBytes(),
   ]);
+
+  const windowDays = retentionDays();
 
   const countFor = (code: string) => counts.find((c) => c.code === code)?.n ?? 0;
   const anyUnconfirmed = rules.some((r) => !r.confirmedWithCarrier);
@@ -104,6 +111,11 @@ export default async function SettingsPage() {
                 failed, so it needs a few weeks of deliveries before it can say anything useful.
               </>}
         </div>
+        <div className="mt-[7px] text-[11.5px] leading-[1.5] text-muted">
+          Worked out from the last {windowDays} days only, because that is all the system keeps.
+          A postcode whose last parcel has aged out of the window drops off this list rather than
+          keeping an old failure rate with no parcels behind it.
+        </div>
         {watched.length > 0 && (
           <table className="mt-3">
             <thead>
@@ -130,6 +142,10 @@ export default async function SettingsPage() {
         )}
       </div>
 
+      <div className="mt-[22px]">
+        <StoragePanel bytes={bytes} windowDays={windowDays} />
+      </div>
+
       {review.length > 0 && (
         <div className="mt-[22px]">
           <Card
@@ -138,7 +154,10 @@ export default async function SettingsPage() {
           >
             {review.map((r) => (
               <div key={r.id} className="border-b border-line px-[14px] py-[11px]">
-                <div className="text-[12.5px] italic text-ink">{r.eventDesc}</div>
+                {/* English first, Correos' sentence beneath — the same way round
+                    as everywhere else the operator looks. Their wording is the
+                    evidence, so it is never rewritten, only labelled. */}
+                <Bilingual {...eventLabels(null, r.eventDesc)} size={12.5} />
                 <div className="mt-1 text-[11.5px] text-muted">
                   code <span className="font-mono">{r.eventCode}</span> · seen {r.timesSeen}{' '}
                   {r.timesSeen === 1 ? 'time' : 'times'}

@@ -92,11 +92,11 @@ export async function undeliveredAlerts(limit = 20) {
     .limit(limit);
 }
 
-/** Old delivered alerts are noise. The housekeeping job clears them. */
-export async function purgeDeliveredAlerts(olderThanDays = 90): Promise<number> {
-  const cutoff = new Date(now().getTime() - olderThanDays * 86_400_000);
-  const gone = await getDb().delete(alerts)
-    .where(and(lt(alerts.createdAt, cutoff), isNull(alerts.error)))
-    .returning({ id: alerts.id });
-  return gone.length;
-}
+/*
+ * Old alerts used to be purged from here, on a 90-day cutoff and on
+ * `error IS NULL`. That moved to lib/cleanup.ts with the rest of the rolling
+ * window, and the predicate changed on the way: it now goes by
+ * `sent_at IS NOT NULL`, so an alert that was never delivered is kept rather
+ * than quietly swept up with the delivered ones. An undelivered alert is
+ * unfinished business.
+ */

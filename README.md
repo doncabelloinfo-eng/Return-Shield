@@ -239,6 +239,48 @@ time budget, both inside the route's `maxDuration`, and it resumes:
 the rest for the next one. The client backs off on 429s and 5xxs and gives up
 rather than hammering.
 
+### The screens
+
+**Today** is what needs doing. **Post office** is what a post office is
+holding. **Parcels** is everything else — a tab per status in journey order,
+each with its count, filtered and paged in SQL because a thousand parcels a day
+means a screen that loads them all gets slower every day until it times out.
+
+That third one was missing, and the gap was not academic: eleven parcels were
+tracked, correct, moving normally through Correos, and on no screen at all.
+Today lists only parcels with a next action and Post office only `at_office`,
+so a parcel simply in transit was invisible.
+
+Two tabs are not a status but a problem:
+
+- **Stuck in pre-admission** — a label printed and nothing from Correos for two
+  **working** days. Weekends never count: Correos does not admit parcels on a
+  Saturday and the warehouse does not hand them over, so a Friday label is not
+  late on Monday. Flagging it would teach the operator to ignore the badge.
+- **Stuck 30+ days, not finished** — past the cleanup window and still going.
+  These are kept rather than deleted, and this is how anybody finds out.
+
+**The operator reads English.** Every label, tab, badge, button and timeline
+entry leads in English, with Correos' own Spanish underneath in a smaller muted
+line — because that is the phrase to match when ringing them or reading the
+public tracker, and it is evidence, so it is never rewritten. Customer-facing
+text is the other way round and stays Spanish: the WhatsApp templates and the
+public `/e/{token}` pages are read by Spanish customers.
+
+### Closing a parcel by hand
+
+"Stop chasing this one" needs a reason: **Lost**, **Delivered (confirmed by
+hand)**, **Returned (received back)** or **Other**, which requires a note. It
+used to write a timestamp and nothing else, so a month later a parcel Correos
+lost and one the customer had all along were the same row.
+
+Each closure also writes a small permanent row to `closures` — order number,
+shop, code, reason, note, value, days from order, who and when, and no customer
+details. The 30-day cleanup never touches that table, so "how many did we lose
+last quarter, and to what" still has an answer after the parcel has gone.
+Undoing a closure marks the row undone rather than deleting it; every count
+excludes those.
+
 ### Shopify
 
 One webhook route per store, HMAC verified on the raw bytes before the body is
@@ -291,7 +333,7 @@ for the morning — the call task attached to the last warning does not.
 | `daily-digest` | from 08:00 | emails what to do today, in order |
 | `import-reminder` | from 09:00 | nudges if TikTok has not been uploaded |
 | `postcode-stats` | nightly | rebuilds the failure rates behind the warning |
-| `housekeeping` | nightly | expired sessions, old rate limits, old payloads, old job runs |
+| `housekeeping` | nightly | expired sessions, old rate limits, and the rolling 30-day window |
 
 Push is not configured, so `reconcile` is not a safety net — it is the only way
 an event arrives. `push-drain` and `push-heartbeat` skip immediately until it

@@ -112,3 +112,49 @@ export function Empty({ children, good = false }: { children: React.ReactNode; g
 export function ParcelLink({ id, children, className }: { id: string; children: React.ReactNode; className?: string }) {
   return <Link href={`/parcel/${id}`} className={className}>{children}</Link>;
 }
+
+/**
+ * English on top, Correos' own words underneath, smaller and muted.
+ *
+ * The operator does not read Spanish, so anything that leads with "Clasificado"
+ * is a label they have to decode before they can act. Correos' phrase still
+ * has to be there: it is what the public tracker shows and what their phone
+ * agents say, so it is the string to match when checking one against the
+ * other. Second line, never the only line.
+ */
+export function Bilingual({
+  en, es, size = 13, className = '',
+}: { en: string; es?: string | null; size?: number; className?: string }) {
+  return (
+    <div className={className}>
+      <div className="font-medium text-ink" style={{ fontSize: `${size}px`, lineHeight: 1.35 }}>{en}</div>
+      {es ? (
+        <div
+          className="italic text-muted"
+          style={{ fontSize: `${Math.max(10, size - 2)}px`, lineHeight: 1.35 }}
+        >
+          {es}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * A red badge a row carries wherever it appears.
+ *
+ * Not tied to the tab it was found under: a parcel stuck in pre-admission is
+ * stuck whether you came at it from "Pre-admission" or from "All not
+ * finished", and a badge that depended on where you looked would be worse than
+ * none.
+ */
+export function AlertBadge({ children }: { children: React.ReactNode }) {
+  return (
+    <span
+      className="inline-block rounded-[3px] border px-[6px] py-[2px] text-[10.5px] font-semibold whitespace-nowrap"
+      style={{ borderColor: 'var(--crit)', background: 'var(--critsoft)', color: 'var(--crit)' }}
+    >
+      {children}
+    </span>
+  );
+}

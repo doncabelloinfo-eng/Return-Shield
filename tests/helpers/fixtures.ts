@@ -17,6 +17,15 @@ export interface MakeShipmentOptions {
   placedAt?: Date;
   storeName?: string;
   postalCode?: string;
+  /** For the Parcels screen and the retention window. */
+  state?: string;
+  stateSince?: Date;
+  /** The day the order came in. What the rolling 30-day window measures. */
+  orderCreatedAt?: Date;
+  city?: string;
+  /** A separate shop, for testing the shop filter. */
+  storeKey?: string;
+  orderNumber?: string;
 }
 
 export interface Fixture {
@@ -41,8 +50,9 @@ export async function makeShipment(opts: MakeShipmentOptions = {}): Promise<Fixt
     set: { depositDays: opts.depositDays ?? 15 },
   });
 
+  const storeKey = opts.storeKey ?? 'test-store';
   const [store] = await getDb().insert(stores).values({
-    key: 'test-store',
+    key: storeKey,
     name: opts.storeName ?? 'Cosmetics Afro Latino',
     platform: 'shopify',
     ingest: 'auto',
@@ -54,25 +64,30 @@ export async function makeShipment(opts: MakeShipmentOptions = {}): Promise<Fixt
   const [order] = await getDb().insert(orders).values({
     storeId: store.id,
     externalOrderId: `ext-${shippingCode}`,
-    orderNumber: `ORD-${shippingCode.slice(-4)}`,
+    orderNumber: opts.orderNumber ?? `ORD-${shippingCode.slice(-4)}`,
     customerName: opts.customerName ?? 'Lucía Fernández Ortiz',
     phoneE164: opts.phone === null ? null : (opts.phone ?? '+34627481093'),
     phoneRaw: opts.phone ?? '+34 627 481 093',
     phoneStatus: opts.phone === null ? 'missing' : 'ok',
     email: 'lucia.fernandez91@example.com',
     addressLine: 'C/ Toledo 44, 3ºB',
-    city: 'Getafe, Madrid',
+    city: opts.city ?? 'Getafe, Madrid',
     postalCode: opts.postalCode ?? '28901',
     totalValueCents: opts.valueCents ?? 6490,
     paymentMethod: opts.paymentMethod ?? 'cod',
     placedAt: opts.placedAt ?? new Date('2026-09-01T08:00:00Z'),
+    // Explicit, because the rolling retention window measures from this and a
+    // test about "an order from 31 days back" cannot use defaultNow().
+    ...(opts.orderCreatedAt ? { createdAt: opts.orderCreatedAt } : {}),
   }).returning({ id: orders.id });
 
   const [ship] = await getDb().insert(shipments).values({
     orderId: order.id,
     shippingCode,
     productCode,
-    state: 'created',
+    state: opts.state ?? 'created',
+    stateSince: opts.stateSince ?? null,
+    ...(opts.orderCreatedAt ? { createdAt: opts.orderCreatedAt } : {}),
   }).returning({ id: shipments.id });
 
   const officeCode = 'OF-MAD-12';

@@ -6,6 +6,7 @@ import { usePathname } from 'next/navigation';
 const TABS = [
   { href: '/today', label: 'Today' },
   { href: '/office', label: 'Post office' },
+  { href: '/parcels', label: 'Parcels' },
   { href: '/import', label: 'Add TikTok orders' },
   { href: '/calls', label: 'Call list' },
   { href: '/settings', label: 'Settings' },
@@ -30,7 +31,9 @@ export function Tabs() {
           </Link>
         );
       })}
-      {path.startsWith('/parcel') && (
+      {/* `/parcel/` with the slash: `/parcels` is its own tab above, and
+          `startsWith('/parcel')` would light both at once. */}
+      {path.startsWith('/parcel/') && (
         <span className="whitespace-nowrap rounded-[5px] border border-navy bg-navy px-[13px] py-[9px] text-[12.5px] font-semibold text-white">
           Parcel
         </span>

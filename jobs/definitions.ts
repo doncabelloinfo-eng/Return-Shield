@@ -442,21 +442,37 @@ export async function staleDetector(): Promise<JobResult> {
 export async function dailyDigest(): Promise<JobResult> {
   const view = await todayView(0, now());
 
+  // Parcels past the cleanup window that are still going. They are kept rather
+  // than deleted, which is right — and keeping them quietly would mean nobody
+  // ever looks at them, so the digest counts them and points at the tab.
+  const { cutoffFor, countKeptUnfinished } = await import('@/lib/cleanup');
+  const { retentionDays } = await import('@/lib/retention');
+  const overdue = await countKeptUnfinished(cutoffFor(now()));
+  const overdueLines = overdue > 0
+    ? [
+      `· ${overdue} ${overdue === 1 ? 'parcel is' : 'parcels are'} more than `
+      + `${retentionDays()} days old and still not finished: `
+      + `${appUrl()}/parcels?status=stuck_30`,
+    ]
+    : [];
+
   if (!view.rows.length) {
     await raiseAlert({
       dedupeKey: `digest-empty:${madridDateKey(now())}`,
       subject: 'Return Shield — nothing needs you today',
       lines: [
         'Every parcel is either moving normally or already handled.',
+        ...(overdueLines.length ? ['', ...overdueLines] : []),
         '',
         'Nothing to do. Have a good morning.',
       ],
     });
-    return { detail: { items: 0 } };
+    return { detail: { items: 0, overdue } };
   }
 
   const lines: string[] = [view.headline, ''];
   for (const d of view.digest) lines.push(`· ${d}`);
+  for (const d of overdueLines) lines.push(d);
   lines.push('', 'In order, most money at risk first:', '');
 
   view.rows.slice(0, 15).forEach((r, i) => {
@@ -702,33 +718,36 @@ export async function rebuildPostcodeStats(): Promise<JobResult> {
 /* -------------------------------------------------------------- nightly */
 
 /** Expired sessions and old rate-limit buckets are dead weight and a liability. */
+/**
+ * Sessions, rate limits, and the rolling retention window.
+ *
+ * The window is the substantial part and lives in lib/cleanup.ts. Everything
+ * it deletes goes by whole Madrid days, one day per night, so this job is the
+ * same on its first night as on its thousandth.
+ */
 export async function housekeeping(): Promise<JobResult> {
   const [sessions, limits] = await Promise.all([purgeExpiredSessions(), purgeRateLimits()]);
 
-  // job_runs grows by about five hundred rows a day and the only thing that
-  // reads it wants the recent past. A month is plenty to answer "when did this
-  // last work".
-  const runCutoff = new Date(now().getTime() - 30 * DAY);
-  const runs = await getDb().delete(jobRuns)
-    .where(lt(jobRuns.startedAt, runCutoff))
-    .returning({ id: jobRuns.id });
+  const { runCleanup, databaseBytes } = await import('@/lib/cleanup');
+  const cleaned = await runCleanup(now());
 
-  const { purgeDeliveredAlerts } = await import('@/lib/alerts');
-  const oldAlerts = await purgeDeliveredAlerts(90);
+  // Measured after the deletes, which is the number worth recording: it says
+  // whether the window is actually holding the database still.
+  const bytes = await databaseBytes();
 
-  // Push payloads older than 90 days have served their purpose as evidence.
-  const cutoff = new Date(now().getTime() - 90 * DAY);
-  const inbox = await getDb().delete(correosPushInbox)
-    .where(and(isNotNull(correosPushInbox.processedAt), lt(correosPushInbox.receivedAt, cutoff)))
-    .returning({ id: correosPushInbox.id });
+  if (cleaned.orders > 0) {
+    await say(
+      `Nightly cleanup removed ${cleaned.orders} finished `
+      + `${cleaned.orders === 1 ? 'order' : 'orders'} older than ${cleaned.windowDays} days`,
+    );
+  }
 
   return {
     detail: {
       sessions,
       rateLimitBuckets: limits,
-      pushPayloads: inbox.length,
-      jobRuns: runs.length,
-      alerts: oldAlerts,
+      ...cleaned,
+      databaseMb: Math.round((bytes / (1024 * 1024)) * 10) / 10,
     },
   };
 }

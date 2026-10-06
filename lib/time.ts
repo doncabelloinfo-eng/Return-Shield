@@ -195,3 +195,97 @@ export function agoInWords(at: Date, from: Date = now()): string {
   const days = Math.round(hours / 24);
   return `${days} day${days === 1 ? '' : 's'} ago`;
 }
+
+/* ---------------------------------------------------------------- working days */
+
+/**
+ * Working days, for "how long has this been stuck".
+ *
+ * Correos does not admit parcels at the weekend and the warehouse does not
+ * hand them over, so a label printed on Friday afternoon is not late on
+ * Monday morning — nothing could have happened in between. Counting in hours
+ * would flag it, the operator would look, find nothing wrong, and learn to
+ * ignore the badge. A badge that cries wolf is worse than no badge.
+ *
+ * HOLIDAYS ARE NOT HERE YET, on purpose: Spain has national, regional and
+ * local ones, and a half-built list is worse than an honest Monday-to-Friday.
+ * Everything below goes through `isWorkingDay`, so adding them later is one
+ * function.
+ */
+
+/** Monday to Friday in Madrid. The only place the rule is written down. */
+export function isWorkingDay(at: Date): boolean {
+  const weekday = madridParts(at).weekday;
+  // DAYS in this file starts at Sunday, so 1–5 is Monday to Friday.
+  return weekday >= 1 && weekday <= 5;
+}
+
+/** Madrid midnight at the start of `at`'s own calendar day. */
+function startOfMadridDay(at: Date): Date {
+  const p = madridParts(at);
+  return madridMidnightUtc(p.year, p.month, p.day);
+}
+
+/** Madrid midnight `days` calendar days after `at`'s day. */
+function addMadridDays(at: Date, days: number): Date {
+  const p = madridParts(at);
+  return madridMidnightUtc(p.year, p.month, p.day + days);
+}
+
+/**
+ * How many whole working days have passed since `from`, as at `to`.
+ *
+ * The day `from` falls on counts as the first working day when it is one, so a
+ * label printed at 23:55 on a Friday has used up its Friday. A day only counts
+ * once it is over, so the count is of working days strictly before `to`'s day:
+ * on Friday itself the answer is 0.
+ *
+ *   Friday event  → 0 on Friday, 1 on Monday, 2 on Tuesday
+ *   Monday event  → 1 on Tuesday, 2 on Wednesday
+ *   Saturday event → counting starts Monday: 1 on Tuesday, 2 on Wednesday
+ */
+export function workingDaysSince(from: Date, to: Date): number {
+  if (to.getTime() < from.getTime()) return 0;
+
+  let cursor = startOfMadridDay(from);
+  const end = startOfMadridDay(to);
+  let count = 0;
+
+  // A guard rather than a `while (true)`: a clock set years wrong should give
+  // a silly number, not spin.
+  for (let step = 0; step < 4000 && cursor.getTime() < end.getTime(); step += 1) {
+    if (isWorkingDay(cursor)) count += 1;
+    cursor = addMadridDays(cursor, 1);
+  }
+
+  return count;
+}
+
+/**
+ * The newest reference time that still counts as `workingDays` working days
+ * old, as at `at`. Anything strictly before it is stuck.
+ *
+ * This exists so the database can do the filtering. `workingDaysSince` answers
+ * the question one row at a time, which is fine for a badge and useless for
+ * "show me the stuck ones" across a table — the screen pages at a hundred
+ * rows out of a thousand a day, so the predicate has to be a single comparison
+ * SQL can run against an index.
+ *
+ * It works because the rule is monotonic: an earlier label is always at least
+ * as stuck as a later one, so there is exactly one cutoff instant. Walk back
+ * from today over `workingDays` working days and take the midnight after the
+ * last of them.
+ */
+export function workingDayCutoff(at: Date, workingDays = 2): Date {
+  let cursor = startOfMadridDay(at);
+  let found = 0;
+
+  for (let step = 0; step < 4000 && found < workingDays; step += 1) {
+    cursor = addMadridDays(cursor, -1);
+    if (isWorkingDay(cursor)) found += 1;
+  }
+
+  // `cursor` is now the oldest of the working days that have fully passed.
+  // A reference time before the END of that day has had all of them.
+  return addMadridDays(cursor, 1);
+}

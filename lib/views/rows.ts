@@ -33,6 +33,9 @@ export interface ShipmentRow extends DecidableShipment {
   officeHours: string | null;
   lastEventAt: Date | null;
   snoozeReason: string | null;
+  /** Why the operator gave up, when they did. Null for older closures. */
+  closeReason: string | null;
+  closeNote: string;
 
   /* --- worked out, so a screen never has to --- */
   /** The big number: days left, or ↩ when it is already coming back. */
@@ -70,6 +73,8 @@ export async function loadRows(opts: { at?: Date } = {}): Promise<ShipmentRow[]>
     mutedUntil: shipments.mutedUntil,
     snoozeReason: shipments.snoozeReason,
     droppedAt: shipments.droppedAt,
+    closeReason: shipments.closeReason,
+    closeNote: shipments.closeNote,
     restockedAt: shipments.restockedAt,
     redirectPending: shipments.redirectPending,
     orderNumber: orders.orderNumber,
@@ -157,6 +162,8 @@ export async function loadRows(opts: { at?: Date } = {}): Promise<ShipmentRow[]>
       officeHours: r.officeHours,
       lastEventAt: r.lastEventAt,
       snoozeReason: r.snoozeReason,
+      closeReason: r.closeReason,
+      closeNote: r.closeNote ?? '',
 
       countdown: coming ? '↩' : (d === null ? '–' : String(d)),
       countdownTone: tone(base.state, r.officeDeadline, at),

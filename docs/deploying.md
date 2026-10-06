@@ -124,6 +124,38 @@ transaction mode, and a driver swap touches every query in the app. If you
 take it on, do it in its own commit with a test that reproduces the crossing
 first.
 
+### How much history is kept
+
+The database is on Supabase's free plan: **500 MB**, and until this shipped
+nothing deleted anything. One `shipment_events` row carries about 550 bytes of
+raw Correos payload, so a thousand parcels a day is roughly a gigabyte a year —
+the only question was when it would stop, not whether.
+
+So the system holds a **rolling 30 days**. Every night `housekeeping` deletes
+the day that has just become the thirty-first day back: orders whose shipments
+have all finished, and with them (by `ON DELETE CASCADE`) their events, tasks,
+messages and contact log. Also trimmed to the same window: activity lines,
+resolved review-queue rows, processed push payloads, delivered alerts, import
+batches and job runs.
+
+Never a sweep that wipes everything older than X all at once. The job is
+identical on its first night and its thousandth, which means a mistake costs
+one day rather than the archive.
+
+**An unfinished parcel past the window is kept until it finishes.** A parcel
+still moving at thirty-one days is exactly the one that needs a human, and
+deleting it would also stop its tracking — the reconcile sweep reads
+`shipments`, so a deleted parcel is one nobody is asking Correos about. They
+get their own tab (Parcels → **Stuck 30+ days**), a red badge wherever they
+appear, and a line in the daily digest.
+
+**Never deleted at all:** users, shops, settings, deposit windows, post
+offices, postcode stats, and `closures` — the permanent record of every parcel
+written off by hand, which is the one table meant to outlive its parcel.
+
+Settings shows the database size against the 500 MB ceiling and turns the bar
+red above 400 MB.
+
 ### Correos — optional, and the app runs without them
 
 | Variable | What breaks without it |
@@ -307,6 +339,7 @@ of sent — visible in the Vercel function logs, but nobody's inbox.
 | Variable | Default |
 |---|---|
 | `DB_POOL_MAX` | 3 on Vercel, 10 elsewhere. Many short-lived instances against one database; a generous pool per instance is how Postgres runs out of connections at 9am. |
+| `RETENTION_DAYS` | 30. How many days of history the system keeps; the nightly job deletes the day that has just fallen off the end. **Never goes below 14** whatever you set — the escalation ladder runs over a fifteen-day deposit window, so a shorter retention would delete parcels still being chased. A value below the floor is clamped and the job detail says so; a value that is not a number falls back to 30. |
 | `SHOPIFY_API_VERSION` | `2026-10`, from `lib/carriers/shopify/api.ts`. A version Shopify has retired does not fail — it silently serves the oldest one still supported, so this is worth reviewing each year. Set it only to pin an older version on purpose. |
 | `RECONCILE_BATCH_SIZE` | 6000. How many parcels one sweep may consider. At ~5,000 live parcels this is "all of them". |
 | `RECONCILE_BUDGET_MS` | 240000. The sweep stops asking Correos anything new after this, which is 60 seconds inside the route's `maxDuration` of 300. |

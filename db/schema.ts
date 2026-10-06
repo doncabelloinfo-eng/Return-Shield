@@ -1,4 +1,5 @@
 import { sql } from 'drizzle-orm';
+import type { CloseReason } from '@/lib/escalation/close-reasons';
 import {
   pgTable, text, integer, bigint, boolean, timestamp, jsonb, uuid,
   uniqueIndex, index, primaryKey, doublePrecision, check,
@@ -92,6 +93,9 @@ export const orders = pgTable('orders', {
   externalIdx: uniqueIndex('orders_store_external_idx').on(t.storeId, t.externalOrderId),
   postcodeIdx: index('orders_postcode_idx').on(t.postalCode),
   phoneIdx: index('orders_phone_idx').on(t.phoneE164),
+  // The rolling 30-day window deletes by the day the order came in, and the
+  // "Stuck 30+ days" tab selects by it. Without this both scan the table.
+  createdIdx: index('orders_created_idx').on(t.createdAt),
 })).enableRLS();
 
 export const shipments = pgTable('shipments', {
@@ -116,7 +120,19 @@ export const shipments = pgTable('shipments', {
   mutedUntil: timestamp('muted_until', { withTimezone: true }),
   snoozeReason: text('snooze_reason'),
   // "Stop chasing this one" — survives every event, silences everything.
+  // This stays the one answer to "is it closed", so code that predates the
+  // three columns below keeps working unchanged.
   droppedAt: timestamp('dropped_at', { withTimezone: true }),
+  /**
+   * Why the operator gave up on it, and what they said.
+   *
+   * Nullable because every parcel closed before these columns existed has no
+   * reason recorded, and inventing one would be worse than an honest null.
+   * New closures always set it — the action refuses without one.
+   */
+  closeReason: text('close_reason').$type<CloseReason>(),
+  closeNote: text('close_note'),
+  closedBy: uuid('closed_by').references(() => users.id, { onDelete: 'set null' }),
   // Put back in stock once it physically came back.
   restockedAt: timestamp('restocked_at', { withTimezone: true }),
   // They asked for a different address and Correos has not been told yet.
@@ -142,6 +158,8 @@ export const shipments = pgTable('shipments', {
   lastEventIdx: index('shipments_last_event_idx').on(t.lastEventAt),
   // The sweep's index: oldest-checked first, among the live ones.
   reconcileIdx: index('shipments_reconcile_idx').on(t.lastReconciledAt),
+  // The "Closed by hand" tab and the retention sweep both ask this.
+  droppedIdx: index('shipments_dropped_idx').on(t.droppedAt),
 })).enableRLS();
 
 /**
@@ -514,4 +532,53 @@ export const jobRuns = pgTable('job_runs', {
    */
   realRunIdx: index('job_runs_real_idx').on(t.job, t.startedAt)
     .where(sql`ok IS TRUE AND skipped IS FALSE`),
+})).enableRLS();
+
+/**
+ * One row per parcel the operator gave up on, and the only thing in this
+ * database that outlives its parcel.
+ *
+ * The rolling 30-day window deletes orders and cascades through shipments,
+ * events, tasks and messages. That is the right trade for a 500 MB database —
+ * but it would also delete the evidence of every write-off, so "how many
+ * parcels did we lose last quarter, and to what" would become unanswerable
+ * after a month. This table answers it.
+ *
+ * Which is why it holds no customer details: it is a permanent record, and a
+ * permanent record of somebody's name, phone and address is a liability rather
+ * than an asset. Order number, shop and tracking code are enough to find the
+ * Shopify order if anybody ever needs the rest.
+ *
+ * About 200 bytes a row, so ten thousand write-offs is some two megabytes.
+ */
+export const closures = pgTable('closures', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  /**
+   * Nullable, and ON DELETE SET NULL rather than CASCADE. This is the whole
+   * point of the table: the parcel goes with the 30-day window and the record
+   * of its closure stays.
+   */
+  shipmentId: uuid('shipment_id').references(() => shipments.id, { onDelete: 'set null' }),
+  orderNumber: text('order_number').notNull(),
+  storeName: text('store_name').notNull(),
+  shippingCode: text('shipping_code').notNull(),
+  reason: text('reason').notNull().$type<CloseReason>(),
+  note: text('note').notNull().default(''),
+  valueCents: integer('value_cents').notNull().default(0),
+  /** Madrid days between the order arriving and it being written off. */
+  daysSinceOrder: integer('days_since_order').notNull().default(0),
+  closedAt: timestamp('closed_at', { withTimezone: true }).notNull().defaultNow(),
+  closedBy: uuid('closed_by').references(() => users.id, { onDelete: 'set null' }),
+  /**
+   * Set when the operator undid the closure, rather than deleting the row.
+   *
+   * Deleting would be simpler and would lose the one thing worth knowing: that
+   * somebody wrote a parcel off and then changed their mind. Every count
+   * excludes these.
+   */
+  undoneAt: timestamp('undone_at', { withTimezone: true }),
+}, (t) => ({
+  closedIdx: index('closures_closed_idx').on(t.closedAt),
+  reasonIdx: index('closures_reason_idx').on(t.reason, t.closedAt),
+  shipmentIdx: index('closures_shipment_idx').on(t.shipmentId),
 })).enableRLS();

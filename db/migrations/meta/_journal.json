@@ -36,6 +36,13 @@
       "when": 1790863783673,
       "tag": "0004_job_run_health_indexes",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1791327383768,
+      "tag": "0005_parcels_closures_retention",
+      "breakpoints": true
     }
   ]
 }

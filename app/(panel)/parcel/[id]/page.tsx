@@ -126,7 +126,9 @@ export default async function ParcelPage({ params }: { params: { id: string } })
           <div>
             <div className="mb-[10px] flex flex-wrap items-baseline gap-[10px]">
               <h2 className="m-0 font-display text-[15px] font-bold text-ink">What Correos told us</h2>
-              <span className="text-[11.5px] text-muted">newest first · their words kept in Spanish</span>
+              <span className="text-[11.5px] text-muted">
+                newest first · their Spanish kept underneath, for reading out on the phone
+              </span>
             </div>
             <EventTimeline
               events={events.map((e, i) => ({
@@ -213,6 +215,8 @@ export default async function ParcelPage({ params }: { params: { id: string } })
           <DangerActions
             shipmentId={row.id}
             dropped={row.dropped}
+            closeReason={row.closeReason}
+            closeNote={row.closeNote}
             canRedirect={row.state === 'at_office' || row.state === 'failed'}
           />
         </div>

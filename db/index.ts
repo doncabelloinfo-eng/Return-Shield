@@ -1,3 +1,4 @@
+import { sql, type SQL } from 'drizzle-orm';
 import { drizzle, type PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 import * as schema from './schema';
@@ -110,6 +111,24 @@ export function rowsOf<T>(result: unknown): T[] {
   if (Array.isArray(result)) return result as T[];
   const rows = (result as { rows?: unknown }).rows;
   return Array.isArray(rows) ? (rows as T[]) : [];
+}
+
+/**
+ * A timestamp a raw query can actually bind.
+ *
+ * Interpolating a `Date` into a `sql` template throws
+ * `ERR_INVALID_ARG_TYPE: Received an instance of Date`. Drizzle only knows a
+ * value's type when it can see the column it is compared against, and inside a
+ * raw fragment it cannot — so the cast has to be written out. The explicit
+ * `::timestamptz` also keeps the comparison indexable, which a bare text
+ * parameter would not be.
+ *
+ * It lives here, next to `rowsOf`, because this has now caught three separate
+ * raw queries: the note in lib/views/rows.ts was not enough, so the fix is a
+ * function rather than a warning.
+ */
+export function at(when: Date): SQL {
+  return sql`${when.toISOString()}::timestamptz`;
 }
 
 /** Shuts the pool down. Scripts and tests only; a request must never call it. */

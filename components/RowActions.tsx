@@ -3,10 +3,11 @@
 import { useRouter } from 'next/navigation';
 import { useEffect, useRef, useState, useTransition } from 'react';
 import type { NextAction } from '@/lib/escalation/decide';
+import { CloseParcel } from './CloseParcel';
 import { useToast } from './Toast';
 import {
   askCorreosAbout, confirmAddressNow, restockParcel, sendNewAddress,
-  stopChasing, undoRestockParcel, undoStopChasing,
+  undoRestockParcel, undoStopChasing,
 } from '@/app/actions/parcel';
 
 /**
@@ -140,8 +141,6 @@ Promise<{ toast: string; undo?: () => Promise<void> } | null> {
 function MoreMenu({
   shipmentId, messageText, shippingCode, mapsHref, onDone,
 }: RowActionProps & { onDone: () => void }) {
-  const [armedDrop, setArmedDrop] = useState(false);
-  const router = useRouter();
   const toast = useToast();
 
   const copy = async (text: string, said: string) => {
@@ -164,19 +163,7 @@ function MoreMenu({
         Copy the code
       </button>
       <a href={mapsHref} target="_blank" rel="noreferrer" className={item} onClick={onDone}>Open in maps</a>
-      <button
-        type="button"
-        className={`${item} text-crit`}
-        onClick={async () => {
-          if (!armedDrop) { setArmedDrop(true); return; }
-          const r = await stopChasing(shipmentId);
-          toast({ text: r.toast, undo: async () => { await undoStopChasing(shipmentId); router.refresh(); } });
-          onDone();
-          router.refresh();
-        }}
-      >
-        {armedDrop ? 'Tap again — stop chasing' : 'Stop chasing this one'}
-      </button>
+      <CloseParcel shipmentId={shipmentId} compact onDone={onDone} />
     </div>
   );
 }

@@ -2,20 +2,31 @@
 
 import { useRouter } from 'next/navigation';
 import { useEffect, useState, useTransition } from 'react';
-import { sendNewAddress, stopChasing, undoStopChasing } from '@/app/actions/parcel';
+import { sendNewAddress, undoStopChasing } from '@/app/actions/parcel';
+import { closeReasonLabel } from '@/lib/escalation/close-reasons';
+import { CloseParcel } from './CloseParcel';
 import { useToast } from './Toast';
 
 /**
  * The two things that are never automated: a redirection, because Correos
  * charges for it, and writing a parcel off, because nothing brings it back.
  *
- * Both ask twice, in place. The confirmation lapses after four seconds so a
- * half-pressed button is not left armed for the next person who walks past.
+ * Neither happens on one tap. The redirection asks twice in place, and the
+ * confirmation lapses after four seconds so a half-pressed button is not left
+ * armed for the next person who walks past. Writing a parcel off asks for a
+ * reason instead, which is a better second step than a second tap: it cannot
+ * be clicked through, and it leaves something behind.
  */
 export function DangerActions({
-  shipmentId, dropped, canRedirect,
-}: { shipmentId: string; dropped: boolean; canRedirect: boolean }) {
-  const [armed, setArmed] = useState<'redirect' | 'drop' | null>(null);
+  shipmentId, dropped, canRedirect, closeReason = null, closeNote = '',
+}: {
+  shipmentId: string;
+  dropped: boolean;
+  canRedirect: boolean;
+  closeReason?: string | null;
+  closeNote?: string;
+}) {
+  const [armed, setArmed] = useState<'redirect' | null>(null);
   const [pending, start] = useTransition();
   const router = useRouter();
   const toast = useToast();
@@ -29,7 +40,8 @@ export function DangerActions({
   if (dropped) {
     return (
       <div className="rounded-[5px] border border-line bg-surface2 px-4 py-3 text-[12.5px] text-muted">
-        We stopped chasing this one.{' '}
+        We stopped chasing this one{closeReason ? `: ${closeReasonLabel(closeReason)}` : ''}.
+        {closeNote ? <> &ldquo;{closeNote}&rdquo;</> : null}{' '}
         <button
           type="button"
           className="font-semibold text-navy underline"
@@ -42,7 +54,7 @@ export function DangerActions({
   }
 
   return (
-    <div className="flex flex-wrap gap-[7px]">
+    <div className="flex flex-col gap-[7px]">
       {canRedirect && (
         <button
           type="button"
@@ -60,23 +72,7 @@ export function DangerActions({
           {armed === 'redirect' ? 'Tap again — Correos charges' : 'Send to a new address'}
         </button>
       )}
-      <button
-        type="button"
-        disabled={pending}
-        onClick={() => {
-          if (armed !== 'drop') { setArmed('drop'); return; }
-          start(async () => {
-            const r = await stopChasing(shipmentId);
-            setArmed(null);
-            toast({ text: r.toast, undo: async () => { await undoStopChasing(shipmentId); router.refresh(); } });
-            router.refresh();
-          });
-        }}
-        className="rounded border border-crit px-4 py-[13px] text-[13px] font-semibold text-crit disabled:opacity-60"
-        style={{ background: armed === 'drop' ? 'var(--critsoft)' : 'transparent' }}
-      >
-        {armed === 'drop' ? 'Tap again — write it off' : 'Stop chasing this one'}
-      </button>
+      <CloseParcel shipmentId={shipmentId} />
     </div>
   );
 }

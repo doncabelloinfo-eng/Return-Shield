@@ -264,7 +264,149 @@ reported success.
 
 ---
 
-## 3. Where I departed from the prototype
+## 3. The screens, the language, and what gets deleted
+
+### Three screens answering three different questions
+
+Today answers "what do I have to do". Post office answers "what is being
+held". Neither answers "where is everything", and that gap was not academic:
+eleven parcels were tracked, correct, moving normally through Correos, and on
+no screen at all. Today lists only parcels with a next action; Post office
+lists only `at_office`. A parcel in transit existed in the database and nowhere
+a human could see it.
+
+Parcels is a tab per status, filtered and paged **in SQL**. `officeView` loads
+every row and filters in memory, which is fine for the few dozen a post office
+holds and wrong at a thousand a day: thirty thousand rows in the window, and a
+screen that loads all of them to show a hundred gets slower every day until it
+times out.
+
+Every tab's count comes from the same predicate as its list, in one statement
+with `count(*) FILTER`. Two queries that agree today drift the moment somebody
+edits one, and a tab that says 7 and lists 5 is a screen nobody trusts again.
+The one exception is deliberate and commented: the Closed-by-hand count comes
+from `closures`, because that is the table its list reads.
+
+### Two working days, not forty-eight hours
+
+"Stuck in pre-admission" counts **working days**. Correos does not admit
+parcels at the weekend and the warehouse does not hand them over, so a label
+printed on Friday afternoon is not late on Monday morning — nothing could have
+happened in between. Counting in hours would flag it, the operator would look,
+find nothing wrong, and learn to ignore the badge. **A badge that cries wolf is
+worse than no badge**, and that is the whole reason this is more complicated
+than a subtraction.
+
+The implementation has a seam worth knowing about. The badge needs a count per
+row; the tab needs a predicate the database can run against thirty thousand
+rows. So there are two functions — `workingDaysSince` for the row and
+`workingDayCutoff` for the query — and they must agree exactly, or a parcel
+appears in the stuck tab with no badge, or carries a badge and is missing from
+the tab. The cutoff works because the rule is monotonic: an earlier label is
+always at least as stuck, so there is exactly one cutoff instant. A test walks
+fourteen days against four different "today"s and asserts the two answers
+match, because that is the kind of agreement that rots silently.
+
+Holidays are deliberately absent. Spain has national, regional and local ones,
+and a half-built list is worse than an honest Monday-to-Friday — so the rule
+lives in one function, `isWorkingDay`, ready for them.
+
+### English first, Spanish second, and Spanish for the customer
+
+The operator reads English. The parcel timeline led with Correos' Spanish in
+italics and put our English in a small chip underneath, which made it a column
+of sentences to decode before it could be used — "Clasificado" and "Admitido."
+are not guessable.
+
+So every label, tab, badge, button and timeline row leads in English, with
+Correos' phrase beneath it, smaller and muted. Their wording is never rewritten
+or translated, only labelled: it is the sentence to read out when ringing them
+and the string to match against the public tracker. It is evidence.
+
+The other half of the rule is easier to break by accident, so it has its own
+tests: **customer-facing text stays Spanish.** The WhatsApp templates and the
+public `/e/{token}` pages are read by Spanish customers, and "translate
+everything to English" would send them a message they cannot read.
+
+Three of the new tracker wordings were deliberately NOT mapped, and the reason
+is the same each time — a word that nearly means something is worse than one
+that means nothing. "Llegada a la oficina de destino" says the parcel reached
+the office, not that the customer can collect it; mapping it to `at_office`
+would start the deposit countdown early and send somebody to collect a parcel
+that is not collectable. "Alta en unidad de reparto" is the delivery unit
+booking it in, not a van on the road. Both go to the review queue, where a
+human can look at real traffic.
+
+### A rolling window, because the database has a ceiling
+
+500 MB on Supabase's free plan, 13 MB used, and nothing deleting anything. One
+`shipment_events` row is about 550 bytes of raw payload, so a thousand parcels
+a day is roughly a gigabyte a year: the only question was when writes would
+start failing, and when they did, tracking would stop arriving with nothing on
+any screen to explain it.
+
+The window is thirty days and it rolls: every night the job deletes the day
+that has just become the thirty-first day back. Never a sweep that removes
+everything older than X at once. The job is identical on its first night and
+its thousandth, which means a mistake costs one day instead of the archive —
+and the first night after this ships is not the night a bug deletes a year.
+
+Three decisions inside it are worth the words.
+
+**An unfinished parcel past the window is kept.** A parcel still moving at
+thirty-one days is precisely the one that needs a human, and deleting it would
+also stop its tracking, because the reconcile sweep reads `shipments`. But
+keeping them quietly is only half an answer, so they get a tab, a badge on
+every list they appear in, and a line in the daily digest. Keeping something
+nobody is told about is just a slower way of losing it.
+
+**The cutoff is a Madrid midnight, not `now - 30 × 86,400,000`.** Subtracting
+milliseconds makes the edge of the window drift through the night, so a run at
+03:15 and a run at 03:20 disagree about a parcel on the boundary — and on the
+night the clocks change, by an hour.
+
+**`closures` is never touched.** It is the one table meant to outlive its
+parcel, which is also why it holds no customer details: a permanent record of
+somebody's name, phone and address is a liability rather than an asset.
+
+`RETENTION_DAYS` can move the window but never below fourteen days, because the
+escalation ladder runs over a fifteen-day deposit window — a shorter retention
+would delete parcels still being chased and the chasing would stop with no
+trace. A number below the floor is clamped; something that is not a number
+falls back to thirty. Those are different mistakes and get different answers,
+which is worth saying because the first version did not: `13` clamped to 14
+while `0` fell back to 30, and the "did it clamp" flag reported one of them as
+fine.
+
+### Closing a parcel needs a reason
+
+"Stop chasing this one" wrote a timestamp and nothing else. A month later the
+system could say how many parcels had been given up on and never why — a parcel
+Correos lost and one the customer had all along were the same row — and once
+the retention window existed, even that much would have gone after thirty days.
+
+So the reason is required, and the second tap IS the reason. That keeps the
+guard against a single click writing a parcel off without adding a step, and it
+cannot be clicked through the way a confirm dialog can. "Other" will not submit
+without a note, because "Other" with nothing written records that somebody
+closed it and nothing else.
+
+`droppedAt` stays the single answer to "is this closed", so everything written
+before the three new columns keeps working untouched. Undo marks the closure
+row undone rather than deleting it: that somebody wrote a parcel off and then
+changed their mind is worth keeping, and every count excludes those rows.
+
+### The dock is gone
+
+The "Customer phone / Correos updates" panel on the right went, and the main
+content took the full width — which the eight-column Parcels table needs. The
+component files are kept rather than deleted: WhatsApp returns in Step 2, and
+the parcel page still has its own Copy message and WhatsApp buttons, which is
+where they belong anyway.
+
+---
+
+## 4. Where I departed from the prototype
 
 The prototype is the specification, and I ported it. These are the places I did
 not, and why. Each one is a small revert if you disagree.
@@ -371,7 +513,7 @@ database so the dashboard and the worker agree about what time it is.
 
 ---
 
-## 4. Things I chose, where the brief left it open
+## 5. Things I chose, where the brief left it open
 
 | | Chose | Why |
 |---|---|---|
@@ -384,7 +526,7 @@ database so the dashboard and the worker agree about what time it is.
 
 ---
 
-## 5. Still open
+## 6. Still open
 
 - **`CRON_SECRET` must be set in production.** Every cron route refuses every
   request without it. That is deliberate — an open endpoint that sweeps the
@@ -418,7 +560,7 @@ database so the dashboard and the worker agree about what time it is.
 
 ---
 
-## 6. What I would do next
+## 7. What I would do next
 
 1. **Point it at the Correos mock.** `CORREOS_TRACKPUB_BASE_URL` already
    exists; the push receiver can be pointed at from their Postman collection.

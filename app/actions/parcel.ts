@@ -3,7 +3,7 @@
 import { revalidatePath } from 'next/cache';
 import { requireUser } from '@/lib/auth/guard';
 import {
-  askCorreos, confirmAddress, dropIt, isCallOutcome, logCall,
+  askCorreos, confirmAddress, dropIt, isCallOutcome, isCloseReason, logCall,
   restock, sendRedirect, undoDrop, undoRestock,
 } from '@/lib/escalation/outcomes';
 import { getDb } from '@/db';
@@ -60,10 +60,17 @@ export async function sendNewAddress(shipmentId: string) {
   return r;
 }
 
-/** Writes the parcel off. Always behind a second tap, and undoable. */
-export async function stopChasing(shipmentId: string) {
+/**
+ * Writes the parcel off. Always behind a second tap, and undoable.
+ *
+ * The reason is validated here as well as in `dropIt`, because this is a
+ * server action: it is a public endpoint whatever the page around it looks
+ * like, and `reason` arrives as whatever the caller sent.
+ */
+export async function stopChasing(shipmentId: string, reason: string, note = '') {
   const user = await requireUser();
-  const r = await dropIt(shipmentId, user.id);
+  if (!isCloseReason(reason)) throw new Error(`unknown close reason: ${reason}`);
+  const r = await dropIt(shipmentId, { reason, note }, user.id);
   refresh();
   return r;
 }

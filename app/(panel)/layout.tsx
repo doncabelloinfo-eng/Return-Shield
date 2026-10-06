@@ -12,7 +12,6 @@ import { TopBar } from '@/components/TopBar';
 import { Ticker } from '@/components/Ticker';
 import { EngineBanner } from '@/components/EngineBanner';
 import { Tabs } from '@/components/Tabs';
-import { Dock } from '@/components/Dock';
 import { ToastHost } from '@/components/Toast';
 
 // Per-request, behind a login or a signed token, and it reads the database.
@@ -52,12 +51,18 @@ export default async function PanelLayout({ children }: { children: React.ReactN
         <EngineBanner health={health} />
         <Ticker items={ticker} />
 
-        <div className="flex flex-col items-start lg:flex-row">
-          <div className="min-w-0 flex-1">
-            <Tabs />
-            {children}
-          </div>
-          <Dock />
+        {/*
+          No dock. The "Customer phone / Correos updates" panel that used to
+          sit on the right is gone, and the main content takes the full width —
+          which the new Parcels table needs, eight columns of it.
+
+          The component files are kept, not deleted: WhatsApp is coming back in
+          Step 2, and the parcel page still has its own Copy message and
+          WhatsApp buttons, which is where that belongs anyway.
+        */}
+        <div className="min-w-0">
+          <Tabs />
+          {children}
         </div>
       </div>
     </ToastHost>

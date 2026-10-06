@@ -25,6 +25,8 @@ export interface CorreosMapping {
 
 /** Descriptions, normalised (see `normaliseDesc`) → state. */
 const BY_DESCRIPTION: Record<string, ShipmentState> = {
+  // The label exists in Correos' systems and the parcel is still with us.
+  'prerregistrado': 'created',
   'admitido': 'accepted',
   'en transito': 'in_transit',
   'en reparto': 'out_for_delivery',
@@ -61,6 +63,38 @@ const DESCRIPTION_ALIASES: Record<string, string> = {
   'rehusado por el destinatario': 'envio rehusado por el destinatario',
   'devolucion a origen': 'devolucion a origen iniciada',
   'inicio de devolucion': 'devolucion a origen iniciada',
+
+  /*
+   * Wordings taken from Correos' own public tracker, 7 October.
+   *
+   * Each one is here because its meaning is unambiguous on its own. The ones
+   * NOT here are the point of the list:
+   *
+   *   "Llegada a la oficina de destino" is not `at_office`. It says the parcel
+   *   reached the office, not that it is waiting there for the customer —
+   *   "A disposición del destinatario" is what says that, and it is the event
+   *   the deposit countdown starts from. Mapping the arrival would start the
+   *   countdown early and send a customer to collect a parcel that is not yet
+   *   collectable.
+   *
+   *   "Alta en unidad de reparto" is the delivery unit booking it in, which is
+   *   still in transit rather than out with the postman. "En reparto" is the
+   *   one that means a van.
+   *
+   * Both of those are left to the review queue, where a human can look at
+   * real traffic and decide. Guessing either costs a wrong countdown.
+   */
+  'envio prerregistrado': 'prerregistrado',
+  'envio prerregistrado en los sistemas de correos pendiente de deposito': 'prerregistrado',
+  'el envio ha tenido admision en origen': 'admitido',
+  'envio clasificado en centro logistico': 'en transito',
+  'envio clasificado': 'en transito',
+  'clasificado': 'en transito',
+  'llegada a la oficina de destino': 'en transito',
+  'alta en unidad de reparto': 'en transito',
+  'a disposicion del destinatario': 'disponible en oficina para recoger',
+  'envio entregado en buzon domiciliario': 'entregado',
+  'retorno a remitente': 'devolucion a origen iniciada',
 };
 
 /**
@@ -99,22 +133,102 @@ const BY_PHASE: Record<string, ShipmentState> = {
   entregado: 'delivered',
 };
 
-/** What each state means, in the words the screens use. */
+/**
+ * What each state means, in the words the screens use.
+ *
+ * ENGLISH LEADS, EVERYWHERE THE OPERATOR LOOKS. The operator does not read
+ * Spanish, so a screen that shows only "Clasificado" is a screen they cannot
+ * use. Correos' own words still appear, in `STATE_ES` below, as a smaller
+ * second line — because when somebody rings Correos or opens the public
+ * tracker, that is the phrase they need to match.
+ *
+ * Customer-facing text is the other way round and stays Spanish: the WhatsApp
+ * and email templates, and the public /e/{token} pages. Those are read by
+ * Spanish customers, and nothing here touches them.
+ */
 export const STATE_LABEL: Record<string, string> = {
-  created: 'Just created',
-  accepted: 'Correos took it',
+  created: 'Pre-admission (label made, not handed to Correos)',
+  accepted: 'Accepted by Correos',
   in_transit: 'On the way',
-  out_for_delivery: 'Out with the postman',
-  failed: 'Nobody home',
-  at_office: 'At post office',
+  out_for_delivery: 'Out for delivery',
+  failed: 'Failed delivery (nobody home)',
+  at_office: 'Waiting at the post office',
   collected: 'Picked up at the post office',
   delivered: 'Delivered',
   bad_address: 'Wrong address',
-  refused: "Doesn't want it",
-  returning: 'Coming back to us',
-  returned: 'Back with us',
+  refused: 'Refused by customer',
+  returning: 'Coming back',
+  returned: 'Returned',
+  stale: 'No news from Correos',
+};
+
+/**
+ * A short English label, for places too narrow for the full one — a chip on a
+ * row, the heading on a parcel. Same meaning, fewer words.
+ */
+export const STATE_LABEL_SHORT: Record<string, string> = {
+  created: 'Pre-admission',
+  accepted: 'Accepted',
+  in_transit: 'On the way',
+  out_for_delivery: 'Out for delivery',
+  failed: 'Nobody home',
+  at_office: 'At post office',
+  collected: 'Picked up',
+  delivered: 'Delivered',
+  bad_address: 'Wrong address',
+  refused: 'Refused',
+  returning: 'Coming back',
+  returned: 'Returned',
   stale: 'No news',
 };
+
+/**
+ * Correos' own word for each state, for the muted second line.
+ *
+ * Not a translation of the English: it is the phrase Correos themselves use,
+ * so it matches what the public tracker and their phone agents say. `stale` is
+ * empty because it is not a Correos state at all — it is our own word for
+ * silence, and inventing Spanish for it would be putting words in their mouth.
+ */
+export const STATE_ES: Record<string, string> = {
+  created: 'Pre-admisión / Prerregistrado',
+  accepted: 'Admitido',
+  in_transit: 'Clasificado / En tránsito',
+  out_for_delivery: 'En reparto',
+  failed: 'Ausente / Intento de entrega fallido',
+  at_office: 'Disponible en oficina',
+  collected: 'Entregado en oficina',
+  delivered: 'Entregado',
+  bad_address: 'Dirección incorrecta',
+  refused: 'Rehusado',
+  returning: 'En devolución',
+  returned: 'Devuelto',
+  stale: '',
+};
+
+/** The pair a screen renders: English first, Correos' words beneath. */
+export interface Bilingual {
+  en: string;
+  /** Empty when Correos has no word of their own for it. */
+  es: string;
+}
+
+export function stateLabels(state: string | null | undefined, short = false): Bilingual {
+  if (!state) return { en: 'Not recognised yet', es: '' };
+  const table = short ? STATE_LABEL_SHORT : STATE_LABEL;
+  return { en: table[state] ?? state, es: STATE_ES[state] ?? '' };
+}
+
+/**
+ * What one Correos event means, for a timeline row: our English on top, their
+ * exact sentence underneath.
+ *
+ * `desc` is passed through untouched. It is evidence — the sentence to read
+ * out on the phone — so it is never rewritten, only labelled.
+ */
+export function eventLabels(mappedState: string | null | undefined, desc: string): Bilingual {
+  return { en: mappedState ? (STATE_LABEL[mappedState] ?? mappedState) : 'Not recognised yet', es: desc };
+}
 
 /**
  * Lowercase, strip accents, flatten every kind of dash and collapse spaces.
@@ -137,7 +251,10 @@ export function normaliseDesc(desc: string): string {
     .replace(/\s*-\s*/g, ' - ')
     .replace(/\s+/g, ' ')
     .trim()
-    .replace(/[.,;:]+$/g, '')
+    // `…` as well as `.`: Correos' tracker truncates longer wordings with a
+    // real ellipsis character, so "Envío prerregistrado…" and the full
+    // sentence are the same event and must reach the same state.
+    .replace(/[.,;:\u2026]+$/g, '')
     .trim();
 }
 
@@ -157,7 +274,7 @@ export function normalisePhase(phase: string): string {
     .replace(/[\u2010-\u2015\u2212]/g, '-')
     .replace(/\s+/g, ' ')
     .trim()
-    .replace(/[.,;:]+$/g, '')
+    .replace(/[.,;:\u2026]+$/g, '')
     .trim();
 }
 
