@@ -65,9 +65,11 @@ whoever reads the log to ignore it.
 
 It is a row in `job_locks` with a `locked_until` lease, taken with a single
 conditional statement — insert-or-update-where-expired, returning the row only
-if this caller won. **Not** a session advisory lock: through Supabase's
-transaction pooler the lock would be taken on one backend and the work done on
-another, so it would protect nothing. The lease is `maxDuration + 30` seconds,
+if this caller won. **Not** a session advisory lock: through a transaction
+pooler the lock would be taken on one backend and the work done on another, so
+it would protect nothing. The app is on the session pooler now, where an
+advisory lock would hold — but a lock whose correctness depends on which port
+`DATABASE_URL` happens to use is not a lock, so this stays as it is. The lease is `maxDuration + 30` seconds,
 so an instance killed without running its `finally` frees the job shortly after
 it could possibly still be working.
 

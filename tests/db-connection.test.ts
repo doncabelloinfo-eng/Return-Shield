@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { connectionShape } from '@/db/connection';
+import { connectionShape, poolerOf } from '@/db/connection';
 
 /**
  * A connection string copied without `?sslmode=require` must not silently
@@ -72,5 +72,29 @@ describe('prepared statements', () => {
     for (const url of [SUPABASE_TXN, SUPABASE_SESSION, 'postgres://postgres@127.0.0.1:55432/return_shield']) {
       expect(connectionShape(url).prepare).toBe(false);
     }
+  });
+});
+
+describe('which pooler a URL points at', () => {
+  it('names them by port', () => {
+    expect(poolerOf(SUPABASE_TXN)).toBe('transaction');
+    expect(poolerOf(SUPABASE_SESSION)).toBe('session');
+  });
+
+  it('does not guess for anything else', () => {
+    expect(poolerOf('postgres://postgres@127.0.0.1:55432/return_shield')).toBe('direct-or-other');
+    // No port at all, which is a direct connection on the default.
+    expect(poolerOf('postgres://postgres@db.abcdefgh.supabase.co/postgres')).toBe('direct-or-other');
+    expect(poolerOf('not a url')).toBe('direct-or-other');
+  });
+
+  it('changes nothing about how we connect', () => {
+    // Worth stating: the port is reported for logs and for the migrator's
+    // warning, and that is all. TLS and `prepare` are decided by the host and
+    // the database name, so moving between poolers cannot silently change the
+    // protocol as well as the routing.
+    const txn = connectionShape(SUPABASE_TXN);
+    const session = connectionShape(SUPABASE_SESSION);
+    expect(txn).toEqual(session);
   });
 });

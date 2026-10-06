@@ -22,6 +22,7 @@ import { loadRows, todayView } from '@/lib/views/rows';
 import { storeEnv } from '@/lib/carriers/shopify/verify';
 import { ingestShopifyOrder, type ShopifyOrderPayload } from '@/lib/carriers/shopify/ingest';
 import { envNumber, envOr } from '@/lib/env';
+import { adminApiUrl } from '@/lib/carriers/shopify/api';
 
 /**
  * Every scheduled job.
@@ -562,8 +563,12 @@ export async function shopifyBackfill(): Promise<JobResult> {
     if (!token || !domain) { skipped.push(store.key); continue; }
 
     const since = new Date(now().getTime() - 2 * DAY).toISOString();
-    const url = `https://${domain}/admin/api/2024-10/orders.json`
-      + `?status=any&fulfillment_status=shipped&updated_at_min=${encodeURIComponent(since)}&limit=100`;
+    const url = adminApiUrl(domain, 'orders.json', {
+      status: 'any',
+      fulfillment_status: 'shipped',
+      updated_at_min: since,
+      limit: '100',
+    });
 
     try {
       const res = await fetch(url, {

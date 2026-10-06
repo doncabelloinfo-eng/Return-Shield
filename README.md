@@ -244,7 +244,20 @@ rather than hammering.
 One webhook route per store, HMAC verified on the raw bytes before the body is
 parsed. `shopify-backfill` pulls recent fulfilments hourly and inserts anything
 whose webhook never arrived, because webhooks are lost more often than people
-expect.
+expect. The Admin API version is one constant in
+`lib/carriers/shopify/api.ts` — Shopify does not reject a retired version, it
+quietly serves the oldest one it still supports, so a stale version here is
+invisible rather than loud.
+
+Adding a store needs no code: a row in `stores`, a webhook made in that store's
+Shopify admin, and an Admin API token from a per-store custom app. The
+procedure is in [docs/deploying.md](docs/deploying.md#adding-a-shopify-store).
+
+Orders that Shopify syncs in from TikTok are **deliberately ignored** — they
+carry `PKA6TP…` codes with no carrier name, so `isCorreos` does not recognise
+them. TikTok comes in through the file upload on the Import screen, and
+teaching `isCorreos` to accept a bare `PKA6TP…` would ingest those orders
+twice.
 
 ### WhatsApp
 

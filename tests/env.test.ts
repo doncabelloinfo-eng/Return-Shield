@@ -227,6 +227,24 @@ describe('an empty gateway credential', () => {
   });
 });
 
+describe('the store key to variable name mapping', () => {
+  it('is what docs/deploying.md promises', () => {
+    // The add-a-store procedure tells the operator exactly which variable to
+    // create, so this mapping is a documented promise rather than an
+    // implementation detail. A store whose variables are named differently
+    // from what the docs say has its webhooks rejected and no way to tell why.
+    process.env.SHOPIFY_DONCABELLO_ACCESS_TOKEN = 'live-shape';
+    process.env.SHOPIFY_DON_CABELLO_ACCESS_TOKEN = 'hyphen-shape';
+    try {
+      expect(storeEnv('doncabello', 'ACCESS_TOKEN')).toBe('live-shape');
+      expect(storeEnv('don-cabello', 'ACCESS_TOKEN')).toBe('hyphen-shape');
+    } finally {
+      delete process.env.SHOPIFY_DONCABELLO_ACCESS_TOKEN;
+      delete process.env.SHOPIFY_DON_CABELLO_ACCESS_TOKEN;
+    }
+  });
+});
+
 describe('an empty Shopify secret', () => {
   it('reads as absent, not as the empty string', () => {
     process.env.SHOPIFY_BLANK_STORE_WEBHOOK_SECRET = '';

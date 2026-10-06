@@ -24,7 +24,7 @@ Set these in **Project → Settings → Environment Variables**.
 
 | Variable | What it is |
 |---|---|
-| `DATABASE_URL` | Postgres connection string. On Supabase this is the **transaction pooler, port 6543** — see [Two Supabase URLs](#two-supabase-urls) below, because migrations need the other one. |
+| `DATABASE_URL` | Postgres connection string. On Supabase use the **session pooler, port 5432** — see [The database port](#the-database-port) below, which is not the obvious choice and has a reason. |
 | `SESSION_SECRET` | 32+ random bytes. Signs login sessions and the public `/e/{token}` links. `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` |
 | `CRON_SECRET` | **You set this by hand. Vercel does not generate it.** Any long random string: `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`. Vercel then sends it as `Authorization: Bearer $CRON_SECRET` on every cron invocation. Without it **every cron route refuses every request**, which is deliberate — and the panel shows a banner, because a dashboard with no engine behind it looks perfectly healthy. |
 | `APP_URL` | The public URL, e.g. `https://shield.example.com`. It goes into the links inside customer messages, so `localhost` here means a dead link on somebody's phone. |
@@ -40,14 +40,16 @@ its own Europe/Madrid arithmetic with `Intl`, and the test suite pins `TZ=UTC`
 so it exercises the same configuration production does. Set it locally if you
 like; it only makes your own logs easier to read.
 
-### Two Supabase URLs
+### The database port
 
-Supabase offers two poolers and this app needs both, for different things.
+**Use the session pooler, port 5432, for both `DATABASE_URL` and
+`MIGRATE_DATABASE_URL`.** Supabase offers two poolers; this app currently uses
+one of them for everything.
 
-| | Port | Used by | Why |
-|---|---|---|---|
-| **Transaction pooler** | 6543 | the app (`DATABASE_URL`) | Multiplexes many short-lived serverless instances onto few backends, which is exactly the shape of this workload. It does not support prepared statements, so `db/connection.ts` sets `prepare: false` everywhere. |
-| **Session pooler** | 5432 | migrations (`MIGRATE_DATABASE_URL`) | A migration takes an advisory lock and runs DDL, and both need a session that stays on one backend. Through the transaction pooler the lock would be taken on one connection and the DDL run on another. |
+| | Port | Status |
+|---|---|---|
+| **Session pooler** | 5432 | **What to use.** Each client gets its own backend for the life of the connection. |
+| **Transaction pooler** | 6543 | **Do not use for the app.** Right on paper for serverless, broke production in minutes. Never valid for migrations. |
 
 Both want `?sslmode=require`. TLS is on by default for any host that is not
 local anyway: `connectionShape()` honours an explicit `?sslmode=` if you give
@@ -56,6 +58,71 @@ and otherwise requires it.
 
 If you are on a single plain Postgres rather than Supabase, one URL does both
 jobs and there is nothing to choose.
+
+#### Why not the transaction pooler
+
+It was tried in production on 6 October and failed three ways within minutes:
+
+1. **Hangs.** `/today` ran to the 300-second function limit and returned 504,
+   repeatedly.
+
+2. **Crossed parameters.** This query
+
+   ```sql
+   select "shipment_id", "at", "outcome", "note" from "contact_log"
+    where "contact_log"."shipment_id" in ($1, $2, $3)
+   ```
+
+   was executed with `['PAQ ESTÁNDAR', 'PAQ 48', 'PAQ PREMIUM']` — the
+   parameters of a different, concurrent query. It failed with `22P02 invalid
+   input syntax for type uuid`, and the error named `unnamed portal parameter
+   $1`. The stack trace ran through `Promise.all`.
+
+3. **Lock timeout.** push-drain's `INSERT INTO job_locks … ON CONFLICT` failed
+   with `57014 canceling statement due to statement timeout`.
+
+The likely cause is that postgres.js pipelines concurrent queries down one
+connection, and Supavisor's transaction mode can route those statements to
+different backends, so one query's `Bind` lands on another's unnamed portal.
+**`prepare: false` does not prevent this** — the problem is the unnamed portals
+and the pipelining, not named prepared statements, and `prepare: false` was
+already set when this happened.
+
+Take the second one seriously even though it threw. It is a **correctness**
+failure, and it threw only because a uuid column happened to reject a product
+code. Two concurrent queries whose parameters are type-compatible — two uuid
+lookups, say — would have crossed silently and shown one parcel's contact log
+under another parcel's name, with nothing in any log.
+
+On 5432 the same pages and the same jobs work.
+
+#### What session mode costs
+
+Session mode holds a backend per client connection, so the ceiling is the
+project's **pool size: 15** on this project, rather than the few hundred the
+transaction pooler would allow.
+
+With `DB_POOL_MAX=3` (the default on Vercel) and `idle_timeout: 20`, that is
+about **five instances holding connections at once**, and each keeps holding
+them for up to 20 seconds after it goes quiet. The sixth concurrent instance
+waits on `connect_timeout` and then fails.
+
+If that starts happening, raise the pool size in **Supabase → Database →
+Settings**. Do not raise `DB_POOL_MAX` against an unchanged ceiling — that
+reaches the same limit with fewer instances.
+
+#### If you want to fix it properly
+
+The work is to stop pipelining concurrent queries down one connection. The
+likely shapes are a driver that serialises per connection (`node-postgres`
+rather than `postgres.js`), or wrapping each query in its own transaction so
+Supavisor pins a backend for it.
+
+Neither is in here, because neither can be verified from a dev machine or a
+cloud session: reproducing crossed parameters needs a real Supavisor in
+transaction mode, and a driver swap touches every query in the app. If you
+take it on, do it in its own commit with a test that reproduces the crossing
+first.
 
 ### Correos — optional, and the app runs without them
 
@@ -117,17 +184,104 @@ relative URL, and production answered `Failed to parse URL from /search/PK…`.
 So it is safe to add a key and leave it blank — you get the default. See
 `lib/env.ts`.
 
-### Shopify — per store, optional
+### Adding a Shopify store
 
-For a store whose `stores.key` is `main-store`:
+**There is no screen for this.** A store is four steps: a database row, a
+webhook, an Admin API token, and a redeploy. Nothing here is a code change —
+the first store, Don Cabello Profesional, was added without touching the
+repository.
+
+Each store has a **key**: a short slug that appears in the webhook URL and in
+the variable names. `doncabello` is the live one. The variable suffix is the key
+uppercased with every non-alphanumeric character turned into an underscore, so
+`doncabello` → `SHOPIFY_DONCABELLO_*` and `don-cabello` → `SHOPIFY_DON_CABELLO_*`.
+Pick a key with no punctuation and the two always match.
 
 | Variable | What breaks without it |
 |---|---|
-| `SHOPIFY_MAIN_STORE_WEBHOOK_SECRET` | Its webhooks are rejected — an unverified webhook writes to the order table, so rejecting is the safe default. |
-| `SHOPIFY_MAIN_STORE_ACCESS_TOKEN` | The hourly backfill skips that store, so a lost webhook is never recovered. |
-| `SHOPIFY_MAIN_STORE_SHOP_DOMAIN` | Optional if `stores.shop_domain` is set in the database. |
+| `SHOPIFY_<KEY>_WEBHOOK_SECRET` | Its webhooks are rejected. An unverified webhook writes to the order table, so rejecting is the safe default. |
+| `SHOPIFY_<KEY>_ACCESS_TOKEN` | The hourly backfill skips that store, so a lost webhook is never recovered. |
+| `SHOPIFY_<KEY>_SHOP_DOMAIN` | Optional if `stores.shop_domain` is set on the row below. |
 
-The key is uppercased with non-alphanumerics turned into underscores.
+#### 1. The store row
+
+In the Supabase SQL editor:
+
+```sql
+insert into stores (key, name, platform, ingest, shop_domain)
+values ('<key>', '<name>', 'shopify', 'auto', '<x>.myshopify.com')
+on conflict (key) do update
+  set name = excluded.name,
+      shop_domain = excluded.shop_domain,
+      active = true;
+```
+
+Re-runnable, so it is also how you rename a store or point it at a new domain.
+
+#### 2. The webhook
+
+In the **Shopify admin** of that store: **Settings → Notifications →
+Webhooks**.
+
+| Field | Value |
+|---|---|
+| Event | **Order fulfillment** |
+| Format | JSON |
+| API version | `2026-10` |
+| URL | `https://<your-app>/api/webhooks/shopify/<key>` |
+
+Admin-made webhooks are signed with **that store's own signing key**, shown on
+the webhooks page once the webhook is created — not with any app's secret. It
+goes in `SHOPIFY_<KEY>_WEBHOOK_SECRET`.
+
+#### 3. The Admin API token
+
+This is the fiddly one, and it is per store.
+
+**Make the app.** A custom app in the agency's Shopify Dev Dashboard. One app
+per store, because custom distribution reaches a single store.
+
+- Scope: `read_orders`. Nothing else is needed.
+- App URL: the app's own URL. Embedding off.
+- Allowed redirect URL: `http://localhost:3456/callback`.
+
+**Install it.** Set the app's distribution to **custom**, nominate the store,
+then install from the link Shopify generates.
+
+**Get the token.** One authorization-code exchange, which the operator runs
+from a small local helper (a few lines of PowerShell: open the authorize URL,
+catch the `code` on `localhost:3456`, POST it to the store's
+`/admin/oauth/access_token`). The offline token that comes back goes in
+`SHOPIFY_<KEY>_ACCESS_TOKEN`.
+
+Two things worth knowing, both learnt the hard way:
+
+- **Custom apps are exempt from Shopify's expiring offline tokens**, so this
+  token does not need rotating.
+- **The client credentials grant does not work here.** It only reaches stores
+  inside the app's own organization, and client stores are collaborator stores
+  in organizations of their own.
+
+#### 4. Redeploy and test
+
+Add the variables in Vercel, redeploy, then use **Send test notification** from
+the webhook's own menu in the Shopify admin. It should answer **200**. The
+hourly `shopify-backfill` picks the store up on its own from the row in step 1.
+
+#### TikTok orders are deliberately skipped
+
+Orders that Shopify syncs in from TikTok carry `PKA6TP…` tracking codes with no
+carrier name, so `isCorreos` in `lib/carriers/shopify/ingest.ts` does not
+recognise them and the webhook ignores them. **That is intended** — TikTok
+orders come in through the manual file upload on the Import screen, and making
+`isCorreos` accept a bare `PKA6TP…` would ingest them twice.
+
+#### Old variables to delete
+
+`SHOPIFY_MAINSTORE_WEBHOOK_SECRET`, `SHOPIFY_MAINSTORE_ACCESS_TOKEN` and
+`SHOPIFY_MAINSTORE_SHOP_DOMAIN` were placeholders from the first deploy. There
+is no `mainstore` row in `stores`, so they belong to nothing and can be removed
+from the Vercel project.
 
 ### WhatsApp — Step 2 only
 
@@ -153,6 +307,7 @@ of sent — visible in the Vercel function logs, but nobody's inbox.
 | Variable | Default |
 |---|---|
 | `DB_POOL_MAX` | 3 on Vercel, 10 elsewhere. Many short-lived instances against one database; a generous pool per instance is how Postgres runs out of connections at 9am. |
+| `SHOPIFY_API_VERSION` | `2026-10`, from `lib/carriers/shopify/api.ts`. A version Shopify has retired does not fail — it silently serves the oldest one still supported, so this is worth reviewing each year. Set it only to pin an older version on purpose. |
 | `RECONCILE_BATCH_SIZE` | 6000. How many parcels one sweep may consider. At ~5,000 live parcels this is "all of them". |
 | `RECONCILE_BUDGET_MS` | 240000. The sweep stops asking Correos anything new after this, which is 60 seconds inside the route's `maxDuration` of 300. |
 
@@ -174,7 +329,7 @@ It needs one secret, under **Settings → Secrets and variables → Actions**:
 
 | Secret | What |
 |---|---|
-| `MIGRATE_DATABASE_URL` | Supabase's **session pooler** URL, port 5432. Not the transaction pooler the app uses — a migration needs a session that stays on one backend. |
+| `MIGRATE_DATABASE_URL` | Supabase's **session pooler** URL, port 5432 — the same URL as `DATABASE_URL`. A migration needs a session that stays on one backend, so this is never the transaction pooler whatever the app is using. |
 
 The workflow has an optional `seed` input, default off. With it on it also runs
 `npm run db:seed`, which needs three more secrets and fails before touching the
@@ -259,13 +414,13 @@ and leave everything else here. It has no dependency on any other route.
 
 ## First deploy, in order
 
-1. Create the Postgres database. Copy **both** URLs if it is Supabase: the
-   transaction pooler (6543) for the app, the session pooler (5432) for
-   migrations.
-2. Set the four required variables in Vercel. `DATABASE_URL` is the transaction
-   pooler one, and **you generate `CRON_SECRET` yourself** — Vercel does not.
-3. Add `MIGRATE_DATABASE_URL` as a GitHub Actions secret (the session pooler
-   URL), plus `SEED_EMAIL`, `SEED_PASSWORD` and `SEED_NAME`.
+1. Create the Postgres database and copy the **session pooler** URL, port
+   5432. On Supabase that one URL is used for both the app and the migrations
+   — see [The database port](#the-database-port) for why not 6543.
+2. Set the four required variables in Vercel. **You generate `CRON_SECRET`
+   yourself** — Vercel does not.
+3. Add `MIGRATE_DATABASE_URL` as a GitHub Actions secret (the same session
+   pooler URL), plus `SEED_EMAIL`, `SEED_PASSWORD` and `SEED_NAME`.
 4. Run **Actions → Database migrate** with `seed` ticked. The migrations build
    the schema; **the seed is what inserts `product_rules`**, and without it
    every parcel has no deposit window and no office deadline, because the
@@ -276,8 +431,9 @@ and leave everything else here. It has no dependency on any other route.
 6. Sign in. The Settings screen will say nothing is connected, and the deposit
    windows from step 4 will be there to check. That is correct.
 7. Add the Correos credentials as they arrive — all four — and press **Test
-   Correos connection**. Then add Shopify's, and watch the Connections panel
-   turn over.
+   Correos connection**. Then add each Shopify store by the procedure in
+   [Adding a Shopify store](#adding-a-shopify-store), and watch the Connections
+   panel turn over.
 
 Each later migration is step 4 again, without `seed`: run the workflow first,
 then deploy. The migration is written so the old code still works against the

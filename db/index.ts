@@ -53,12 +53,25 @@ export function getSql(): postgres.Sql {
     // Serverless runs many short-lived instances against one database, so each
     // one holds a small pool and gives connections back quickly. A generous
     // pool per instance is how a Postgres runs out of connections at 9am.
+    //
+    // THIS NUMBER IS THE BINDING CONSTRAINT RIGHT NOW. The app is on
+    // Supabase's SESSION pooler, port 5432, because transaction mode crossed
+    // query parameters between concurrent queries — see the note at the top of
+    // db/connection.ts. Session mode gives each client its own backend for the
+    // life of the connection, so the ceiling is the project's pool size rather
+    // than something large: 15 on this project. At 3 per instance that is five
+    // instances holding connections at once, and `idle_timeout: 20` is how
+    // long one keeps holding them after it goes quiet.
+    //
+    // So the sixth concurrent instance waits on `connect_timeout` and then
+    // fails. If that starts happening, the pool size is raised in Supabase →
+    // Database → Settings; do not raise DB_POOL_MAX against an unchanged
+    // ceiling, which just reaches it with fewer instances.
     max: envNumber('DB_POOL_MAX', process.env.VERCEL ? 3 : 10),
     idle_timeout: 20,
     connect_timeout: 10,
-    // Supabase's transaction pooler multiplexes connections across backends,
-    // so a prepared statement named on one does not exist on the next. See
-    // db/connection.ts for why this is off everywhere rather than just there.
+    // Off everywhere, including on the session pooler where it would work.
+    // See db/connection.ts.
     prepare: shape.prepare,
     ssl: shape.ssl,
     onnotice: () => {},

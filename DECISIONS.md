@@ -53,20 +53,58 @@ check that it stays that way.
 
 ## 2. Running on Supabase, and making a dropped job visible
 
-### Two connection strings, because the poolers are not interchangeable
+### The transaction pooler was the plan, and it was wrong
 
-The app connects through Supabase's **transaction** pooler (6543) and
-migrations through the **session** pooler (5432). The transaction pooler
-multiplexes many short-lived serverless instances onto few backends, which is
-this workload's shape exactly, but it does not support prepared statements — so
-`prepare: false` everywhere, not just there, because a connection string can be
-changed without a deploy and a setting that only holds for Supabase is a
-setting that breaks when somebody changes the URL.
+The design was: the app on Supabase's **transaction** pooler (6543), which
+multiplexes many short-lived serverless instances onto few backends and is
+this workload's shape exactly; migrations on the **session** pooler (5432),
+because an advisory lock and DDL need a session that stays on one backend.
+`prepare: false` everywhere, not just on the pooler, because a connection
+string can be changed without a deploy and a setting that only holds for
+Supabase is a setting that breaks when somebody changes the URL.
 
-A migration cannot use it at all: it takes an advisory lock and runs DDL, and
-through a transaction pooler the lock would be taken on one backend and the DDL
-run on another. Hence the second URL, and hence `db/migrate.ts` saying so in
-its own comments where somebody reaching for it will read them.
+**Both are now on 5432.** On 6543, production broke within minutes: `/today`
+hung to the 300-second limit, push-drain's `job_locks` upsert hit a statement
+timeout, and — the one that matters — a `contact_log` query ran with a
+*different concurrent query's* parameters, `['PAQ ESTÁNDAR', 'PAQ 48', 'PAQ
+PREMIUM']` against a uuid column. `22P02`, on `unnamed portal parameter $1`,
+through a `Promise.all`.
+
+postgres.js pipelines concurrent queries down one connection; Supavisor's
+transaction mode can route those statements to different backends, so one
+query's `Bind` lands on another's unnamed portal. `prepare: false` does not
+prevent it, and was already set.
+
+Two things are worth keeping about this.
+
+It is a **correctness** failure wearing a performance failure's clothes. It
+threw only because a uuid column rejected a product code. Two concurrent
+queries with type-compatible parameters would have crossed in silence and
+rendered one parcel's contact log under another parcel's name — and no screen,
+log or test in this system would have noticed. The 504s were the symptom that
+got attention; the crossing is the one that should have.
+
+And the architectural lesson is narrower than "pooling is hard": **a pooler and
+a client that both make reasonable assumptions can still be wrong together.**
+Transaction-mode pooling assumes statements are independent; a pipelining
+driver assumes a connection is its own. Neither is unreasonable. The seam
+between them is where the data corrupted, and nothing in either component's
+documentation is where you would look.
+
+What session mode costs is a ceiling: one backend per client connection, so the
+limit is the project's pool size (15) rather than hundreds. At `DB_POOL_MAX=3`
+that is about five busy instances, which is fine at this volume and is written
+down in `db/index.ts` next to the number, because the failure mode when it is
+reached — the sixth instance waiting out `connect_timeout` — looks nothing like
+a pool-size problem.
+
+Fixing 6543 properly means not pipelining: a driver that serialises per
+connection (`node-postgres`), or a transaction around each query so Supavisor
+pins a backend. Neither is in here, and deliberately so — reproducing the
+crossing needs a real Supavisor in transaction mode, which neither a dev
+machine nor a cloud session can reach, and a driver swap touches every query in
+the app. Shipping that on theory is how you trade a known problem for an
+unknown one.
 
 TLS is on for anything that is not local. An explicit `?sslmode=` always wins,
 localhost and any database whose name ends in `_test` are exempt, everything

@@ -61,7 +61,7 @@ jobs:
         run: |
           if [ -z "${DATABASE_URL}" ]; then
             echo "::error::MIGRATE_DATABASE_URL is not set. Add it under Settings → Secrets and variables → Actions."
-            echo "It should be Supabase's SESSION pooler URL (port 5432), not the transaction pooler the app uses."
+            echo "It should be Supabase's SESSION pooler URL (port 5432). A migration takes an advisory lock and runs DDL, so it needs a session that stays on one backend."
             exit 1
           fi
           echo "MIGRATE_DATABASE_URL is present."
