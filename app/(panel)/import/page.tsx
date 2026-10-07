@@ -11,10 +11,11 @@ import { PageHeading } from '@/components/ui';
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 /**
- * Shopify orders come in on their own. TikTok orders are a file.
+ * Shopify orders come in on their own. TikTok and Amazon orders are a file.
  *
- * Phone numbers get cleaned up here automatically — only the ones nobody can
- * guess are left for a person, with a box right there to fix them.
+ * The file says which marketplace each row is from — both export the same
+ * eight columns, so it is worked out from the order number rather than from
+ * the file name, which people rename.
  */
 export default async function ImportPage() {
   const batches = await getDb().select().from(importBatches)
@@ -23,11 +24,13 @@ export default async function ImportPage() {
   return (
     <div className="px-4 pb-10 pt-[18px]">
       <PageHeading
-        title="Add TikTok orders"
+        title="Upload orders"
         note={
           <span className="block max-w-[700px]">
-            Shopify orders come in on their own. TikTok orders are a file. Phone numbers get
-            cleaned up here automatically — only the ones nobody can guess are left for you.
+            TikTok · Amazon. Shopify orders come in on their own; these are a file. Each row
+            says which marketplace it is from, worked out from the order number, so one file
+            can hold both. Phone numbers in a full export get cleaned up automatically — only
+            the ones nobody can guess are left for you.
           </span>
         }
       />

@@ -9,6 +9,13 @@ import { HOUR } from '@/lib/clock';
  * safe to replay the whole table after fixing a normaliser bug.
  */
 
+/**
+ * "Prerregistrado" — the label exists in Correos' systems and the parcel is
+ * still with us. Named here because three places key off it: the ship-date
+ * fallback, the pre-admission flag, and the state map.
+ */
+export const PRE_ADMISSION_CODE = 'A090000V';
+
 export interface ProjectableEvent {
   eventCode: string;
   eventDesc: string;
@@ -30,6 +37,15 @@ export interface Projection {
   failedAt: Date | null;
   /** Newest event of any kind, mapped or not. Silence is measured from here. */
   lastEventAt: Date | null;
+  /**
+   * The first Prerregistrado event (`A090000V`): Correos' own first sighting
+   * of the label. Used as the ship date when no source gave us a real one.
+   *
+   * The FIRST, not the newest. A label re-registered after a problem would
+   * otherwise move the parcel's ship date forward and reset its place in the
+   * retention window.
+   */
+  preAdmittedAt: Date | null;
   eventCount: number;
   /** Events Correos sent that we have no mapping for. */
   unmappedCount: number;
@@ -60,10 +76,15 @@ export function project(events: readonly ProjectableEvent[], opts: ProjectOption
   let officeName: string | null = null;
   let failedAt: Date | null = null;
   let lastEventAt: Date | null = null;
+  let preAdmittedAt: Date | null = null;
   let unmappedCount = 0;
 
   for (const ev of ordered) {
     if (!lastEventAt || ev.occurredAt > lastEventAt) lastEventAt = ev.occurredAt;
+    if (ev.eventCode === PRE_ADMISSION_CODE
+      && (!preAdmittedAt || ev.occurredAt < preAdmittedAt)) {
+      preAdmittedAt = ev.occurredAt;
+    }
     if (ev.mappedState === null) { unmappedCount += 1; continue; }
 
     const next = applyEvent(state, ev.mappedState);
@@ -97,6 +118,7 @@ export function project(events: readonly ProjectableEvent[], opts: ProjectOption
     officeDeadline,
     failedAt,
     lastEventAt,
+    preAdmittedAt,
     eventCount: ordered.length,
     unmappedCount,
   };

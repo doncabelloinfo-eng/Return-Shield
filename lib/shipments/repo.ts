@@ -77,6 +77,11 @@ export async function reproject(shipmentId: string): Promise<Projection> {
     failedAt: p.failedAt,
     lastEventAt: p.lastEventAt,
     officeId,
+    // The ship date only when nothing better is already there. A Shopify
+    // fulfilment date or a file's `ship-date` is the real thing and must not
+    // be overwritten by Correos' first sighting of the label, which is hours
+    // to days later.
+    ...(ship.shippedAt === null && p.preAdmittedAt ? { shippedAt: p.preAdmittedAt } : {}),
   }).where(eq(shipments.id, shipmentId));
 
   return p;

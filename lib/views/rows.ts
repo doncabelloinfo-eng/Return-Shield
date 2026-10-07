@@ -8,7 +8,11 @@ import {
 } from '@/lib/escalation/decide';
 import { daysLeft, exact, human } from '@/lib/time';
 import { now } from '@/lib/clock';
-import { mapsLink, officeDetails, telLink, whatsappLink, DEFAULT_OFFICE_HOURS } from '@/lib/messaging/build-message';
+import {
+  emailLink, mapsLink, officeDetails, officeEmailSubject, telLink, whatsappLink,
+  DEFAULT_OFFICE_HOURS,
+} from '@/lib/messaging/build-message';
+import { customerLabel, isMarketplace, realFirstName } from '@/lib/orders/customer-label';
 import { firstName } from '@/lib/escalation/decide';
 import { displayPhone } from '@/lib/import/phone';
 
@@ -58,6 +62,8 @@ export interface ShipmentRow extends DecidableShipment {
   mapsHref: string;
   /** The finished Spanish message, ready to copy. */
   messageText: string;
+  /** A `mailto:` with the same text, when the order has an email. */
+  emailHref: string;
   lastContactLine: string;
 }
 
@@ -88,6 +94,7 @@ export async function loadRows(opts: { at?: Date } = {}): Promise<ShipmentRow[]>
     city: orders.city,
     postalCode: orders.postalCode,
     storeName: stores.name,
+    storePlatform: stores.platform,
     officeName: offices.name,
     officeAddress: offices.address,
     officeHours: offices.openingHours,
@@ -120,7 +127,13 @@ export async function loadRows(opts: { at?: Date } = {}): Promise<ShipmentRow[]>
       officeDeadline: r.officeDeadline,
       officeName: r.officeName,
       town: r.city ?? '',
-      customerName: r.customerName,
+      // The label, so every screen and every alert says something useful about
+      // a parcel with no customer name. See lib/orders/customer-label.ts.
+      customerName: customerLabel({
+        customerName: r.customerName,
+        orderNumber: r.orderNumber,
+        platform: r.storePlatform,
+      }),
       valueCents: r.valueCents,
       paymentMethod: r.paymentMethod,
       dropped: r.droppedAt !== null,
@@ -136,8 +149,17 @@ export async function loadRows(opts: { at?: Date } = {}): Promise<ShipmentRow[]>
     const snoozed = isSnoozed(base, at);
     const coming = r.state === 'returning' || r.state === 'refused' || r.state === 'returned';
 
+    /*
+     * `realFirstName`, not `firstName`: the marketplace files carry no name,
+     * so the column is empty and `officeDetails` writes "Hola," rather than
+     * "Hola Unknown". And `viaMarketplace` drops "somos {store}", because the
+     * text is pasted into Amazon's or TikTok's own chat, which already shows
+     * the seller.
+     */
+    const viaMarketplace = isMarketplace(r.storePlatform);
     const messageText = officeDetails({
-      firstName: firstName(r.customerName),
+      firstName: realFirstName(r.customerName),
+      viaMarketplace,
       storeName: r.storeName,
       orderNumber: r.orderNumber,
       shippingCode: r.shippingCode,
@@ -183,6 +205,9 @@ export async function loadRows(opts: { at?: Date } = {}): Promise<ShipmentRow[]>
       waHref: r.phoneE164 ? whatsappLink(r.phoneE164, messageText) : '',
       mapsHref: mapsLink(r.officeName, r.officeAddress),
       messageText,
+      emailHref: r.email
+        ? emailLink(r.email, officeEmailSubject(r.orderNumber), messageText)
+        : '',
       lastContactLine: last
         ? `Last time: ${last.outcome} ${human(last.at, at)}${last.note ? ` — "${last.note}"` : ''}`
         : 'Never contacted',

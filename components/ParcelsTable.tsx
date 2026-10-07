@@ -24,6 +24,8 @@ export function ParcelsTable({ rows, empty }: { rows: ParcelListRow[]; empty: Re
             <Th>Shop</Th>
             <Th>Last word from Correos</Th>
             <Th>In this status</Th>
+            <Th>Ordered</Th>
+            <Th>Shipped</Th>
             <Th>Goes back</Th>
             <Th align="right">Value</Th>
             <Th>Phone</Th>
@@ -71,6 +73,20 @@ export function ParcelsTable({ rows, empty }: { rows: ParcelListRow[]; empty: Re
               <td className="whitespace-nowrap border-b border-line px-3 py-[10px]">
                 <Bilingual en={r.status.en} es={r.status.es} size={12} />
                 <div className="mt-[3px] text-[11.5px] text-muted">{r.inStatus}</div>
+              </td>
+
+              <td className="whitespace-nowrap border-b border-line px-3 py-[10px] text-[12.5px]">
+                {/* The marketplace tracking files carry no order date at all,
+                    so this is "—" rather than the ship date repeated. The
+                    importer used to write one into the other. */}
+                {r.orderedOn
+                  ? <span className="text-ink">{r.orderedOn}</span>
+                  : <span className="text-muted" title="This file had no order date">—</span>}
+              </td>
+
+              <td className="whitespace-nowrap border-b border-line px-3 py-[10px] text-[12.5px] text-ink"
+                title={r.shippedExact}>
+                {r.shippedOn}
               </td>
 
               <td className="whitespace-nowrap border-b border-line px-3 py-[10px] text-[12.5px]">

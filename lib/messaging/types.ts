@@ -16,6 +16,13 @@ export interface MessageContext {
   deadline: Date | null;
   /** The customer's own page for this parcel, or null in Step 1. */
   actionUrl: string | null;
+  /**
+   * The message will be pasted into Amazon's or TikTok's own chat rather than
+   * sent from us. The marketplace already shows the seller, so "somos
+   * {storeName}" is left out — saying "somos Amazon ES" would be claiming to
+   * be the marketplace.
+   */
+  viaMarketplace?: boolean;
 }
 
 /** Every rung that speaks to a customer. The id is the rung's id. */

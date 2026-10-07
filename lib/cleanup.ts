@@ -102,17 +102,32 @@ export async function runCleanup(at: Date = now()): Promise<CleanupReport> {
    * delivered, collected, returned, or closed by hand, which is the same
    * definition the Parcels screen uses.
    */
+  /*
+   * THE WINDOW COUNTS FROM THE SHIP DATE, not from when the row was written.
+   *
+   * `orders.created_at` was the obvious choice and is wrong the moment history
+   * is pulled in: a thirty-day Shopify pull writes every order with today's
+   * date, so a parcel posted five weeks ago would be kept for another thirty
+   * days — and the first pull would hold two months at once before settling.
+   *
+   * The newest ship date among an order's shipments decides, so an order whose
+   * second parcel went out a week later is not deleted around it.
+   */
   const orders = await deleteBatched('orders', (limit) => raw`
     DELETE FROM orders
      WHERE id IN (
        SELECT o.id FROM orders o
-        WHERE o.created_at < ${iso}::timestamptz
-          AND NOT EXISTS (
+        WHERE NOT EXISTS (
             SELECT 1 FROM shipments s
              WHERE s.order_id = o.id
                AND s.dropped_at IS NULL
                AND s.state NOT IN ('delivered', 'collected', 'returned')
           )
+          AND COALESCE(
+            (SELECT max(COALESCE(s.shipped_at, s.created_at))
+               FROM shipments s WHERE s.order_id = o.id),
+            o.created_at
+          ) < ${iso}::timestamptz
         LIMIT ${limit}
      )
     RETURNING id
@@ -202,13 +217,18 @@ export async function runCleanup(at: Date = now()): Promise<CleanupReport> {
   };
 }
 
-/** Orders past the window whose parcels are still going. Kept, and counted. */
+/**
+ * Parcels past the window that are still going. Kept, and counted.
+ *
+ * By ship date, the same as the delete above and the same as the "Stuck 30+
+ * days" tab — so the tab, the digest line and the cleanup cannot disagree
+ * about which parcels are old.
+ */
 export async function countKeptUnfinished(keepFrom: Date): Promise<number> {
   const result = await getDb().execute(raw`
     SELECT count(*)::int AS n
       FROM shipments s
-      JOIN orders o ON o.id = s.order_id
-     WHERE o.created_at < ${keepFrom.toISOString()}::timestamptz
+     WHERE COALESCE(s.shipped_at, s.created_at) < ${keepFrom.toISOString()}::timestamptz
        AND s.dropped_at IS NULL
        AND s.state NOT IN ('delivered', 'collected', 'returned')
   `);

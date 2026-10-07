@@ -406,7 +406,139 @@ where they belong anyway.
 
 ---
 
-## 4. Where I departed from the prototype
+## 4. The ship date, the pull, and files that say which they are
+
+### The window had to count from the ship date
+
+`orders.created_at` is not the day a parcel went out, and after a thirty-day
+pull it is not even close: every pulled order is written with today's date. A
+retention window counted from that would keep a parcel posted five weeks ago
+for another thirty days, and the first pull would hold two months at once
+before settling down.
+
+So `shipments.shipped_at` exists, with three sources in order of how much they
+are worth: the Shopify fulfilment's own `created_at` or a marketplace file's
+`ship-date`; then Correos' Prerregistrado event; then when we first saw the
+row. The cleanup, the "Stuck 30+ days" tab and the date filter all read the
+same `COALESCE(shipped_at, created_at)`, because a parcel in the tab that the
+cleanup will not delete is the kind of inconsistency nobody reports and
+everybody stops trusting.
+
+The migration backfills with the same chain, and the pull overwrites those
+fallbacks with the real fulfilment date as it goes — which is why the upsert
+there is `onConflictDoUpdate` rather than `DoNothing`, and why it distinguishes
+an insert from an update with `xmax = 0`: a parcel the pull merely re-dated is
+not a new parcel and must not be announced.
+
+`orders.placed_at` became nullable in the same migration. The marketplace files
+genuinely have no order date, and the importer was writing the ship date into
+it — so the two columns on the Parcels screen said the same thing while
+claiming the order was placed the day it was posted. A null the screen shows as
+"—" is the honest answer.
+
+### Two Shopify bugs that cost orders silently
+
+The hourly check asked for `limit: 100` and read the **first page only**. At a
+thousand parcels a day, two days of orders is several hundred — so it was
+looking at a fraction of them and reporting success. Shopify says nothing when
+a page ends early; the page simply ends. It also filtered
+`fulfillment_status=shipped`, which leaves out partially fulfilled orders whose
+posted parcel is as real as any other.
+
+Both are fixed by one paged reader that the hourly check and the new thirty-day
+pull share, following the `Link` header to the end at 250 a page. The lesson
+worth keeping: a loop that reads one page and stops is indistinguishable from a
+loop that read everything, and neither logs anything.
+
+### History arriving quietly
+
+A pulled parcel is new to us and not new in the world. Left alone, the first
+sweep would narrate its whole life — "nobody home, reminders started", "now at
+the post office", "delivered, closed itself" — for something that finished a
+fortnight ago, and then fire the four reminders that were due while nobody was
+watching at a customer who may already have collected.
+
+So `ingestEvent` takes a `quiet` flag and the sweep sets it for any parcel it
+has never asked about before — `last_reconciled_at IS NULL` is exactly the
+right signal, and it needed no new column. The events are written and the state
+recomputed; nothing is said. Then `settleHistory` decides **once**: a parcel
+already finished gets nothing at all, and one that still needs a person gets
+what a new event of that state would give it today, followed by silencing every
+message rung whose due time has gone by. The final warning stays armed, because
+that one is still ahead of the customer.
+
+One ticker line per pull, not one per parcel. The ticker holds twenty-four
+hours, so a thousand lines of history would bury a whole day of real events —
+which is a slower way of losing them.
+
+### Working days, again, and a seam to watch
+
+"Same status 3+ working days" uses the same two functions as pre-admission:
+`workingDaysSince` for the per-row badge and `workingDayCutoff(at, 3)` for the
+predicate the database runs. They must agree exactly, or a row appears in the
+tab with no badge or carries a badge and is missing from the tab, so both tabs
+have a test that walks a fortnight against four different "today"s and asserts
+the two answers match.
+
+Which states it applies to is the interesting decision. Not `created`, which
+has its own two-day flag; not `at_office`, which has a deposit countdown that
+is a better signal than silence; not `refused`, `returning` or `stale`, which
+are already moving the right way or already flagged. Five states, where three
+days of silence actually means late.
+
+### Missed delivery is not the same as waiting at an office
+
+A parcel the customer *chose* to collect from an office was never out for
+delivery and nobody missed anything. One that got there after a failed attempt
+is a different problem with a different conversation, so it is a different tab
+— and the test for it checks both directions, because the distinction is the
+whole value of the tab.
+
+The discriminator is whether a `failed` or `out_for_delivery` event happened
+**before** `office_arrived_at`. Out-for-delivery counts even with no failed
+event, because Correos does not always send one; an attempt *after* it reached
+the office does not, because that is a later story.
+
+### Files that look identical and are not
+
+Amazon and TikTok export the same eight columns. The `order-id` is the only
+reliable difference — `404-0000000-0000001` against eighteen plain digits — and
+the file name is never proof: one real file was
+`Seguimiento_Amazon_07102026_015340.txt` and the other `tiktok shop.txt`.
+Amazon's filled `order-item-id` and `quantity` agree with the order id, but a
+TikTok export that populated them one day would then be read as Amazon, so they
+are not used.
+
+Three smaller calls:
+
+**An `order-id` like `5.76962E+17` is refused, not repaired.** Excel rewrote a
+long number in scientific notation when somebody opened and saved the file, and
+the digits are gone. The row says so and names the fix — export it again and do
+not open it in Excel — rather than importing a parcel nobody can place.
+
+**A missing phone is not an error in these files.** They carry no customer
+details at all, so judging the rows on a phone number would paint all eighty
+red and make the preview worthless. The database stores an empty
+`customer_name` rather than "Unknown customer", and the screens label it — the
+useful side effect being that the Spanish greeting becomes "Hola," by itself
+rather than by a check somebody has to remember to write.
+
+**Correos Express is skipped by name**, before the looser "contains Correos"
+test. It is a separate courier with its own tracking numbers, and one of its
+parcels would sit here for ever while the sweep asked Correos about a code
+Correos has never heard of.
+
+### No default for the marketplace order URLs
+
+`AMAZON_ORDER_URL` and `TIKTOK_ORDER_URL` are optional and empty. Seller-central
+paths differ per marketplace, per region and per account, and a guessed URL
+sends the operator to a 404 at the moment they are trying to stop a parcel
+going back. Until one is pasted in, the button is "Copy order number", which
+still works and takes one more paste.
+
+---
+
+## 5. Where I departed from the prototype
 
 The prototype is the specification, and I ported it. These are the places I did
 not, and why. Each one is a small revert if you disagree.
@@ -513,7 +645,7 @@ database so the dashboard and the worker agree about what time it is.
 
 ---
 
-## 5. Things I chose, where the brief left it open
+## 6. Things I chose, where the brief left it open
 
 | | Chose | Why |
 |---|---|---|
@@ -526,7 +658,7 @@ database so the dashboard and the worker agree about what time it is.
 
 ---
 
-## 6. Still open
+## 7. Still open
 
 - **`CRON_SECRET` must be set in production.** Every cron route refuses every
   request without it. That is deliberate — an open endpoint that sweeps the
@@ -560,7 +692,7 @@ database so the dashboard and the worker agree about what time it is.
 
 ---
 
-## 7. What I would do next
+## 8. What I would do next
 
 1. **Point it at the Correos mock.** `CORREOS_TRACKPUB_BASE_URL` already
    exists; the push receiver can be pointed at from their Postman collection.

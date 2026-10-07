@@ -117,6 +117,14 @@ export default async function ParcelPage({ params }: { params: { id: string } })
                 WhatsApp
               </a>
             )}
+            {/* The same text as Copy message and WhatsApp, with the Spanish
+                subject from build-message.ts, so the wording has one home. */}
+            {row.emailHref && (
+              <a href={row.emailHref}
+                className="flex-1 rounded border border-navy px-[11px] py-[9px] text-center text-[12px] font-semibold text-navy">
+                Email
+              </a>
+            )}
           </div>
         </div>
       </div>

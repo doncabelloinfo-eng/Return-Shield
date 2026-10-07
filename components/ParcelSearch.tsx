@@ -14,7 +14,7 @@ export function ParcelSearch({
   stores, current,
 }: {
   stores: string[];
-  current: { q: string; store: string };
+  current: { q: string; store: string; date: string };
 }) {
   const router = useRouter();
   const params = useSearchParams();
@@ -45,20 +45,40 @@ export function ParcelSearch({
         <span className="absolute left-[10px] top-[9px] text-[13px] text-muted">⌕</span>
       </div>
 
-      {stores.length > 1 && (
-        <div className="mt-[10px] flex flex-wrap items-center gap-2 rounded-[5px] border border-line bg-surface px-3 py-[10px]">
-          {['All shops', ...stores].map((s) => (
-            <button
-              key={s}
-              type="button"
-              onClick={() => set('store', s)}
-              className={chip(s === 'All shops' ? !current.store : current.store === s)}
-            >
-              {s}
-            </button>
-          ))}
-        </div>
-      )}
+      <div className="mt-[10px] flex flex-wrap items-center gap-2 rounded-[5px] border border-line bg-surface px-3 py-[10px]">
+        {stores.length > 1 && ['All shops', ...stores].map((s) => (
+          <button
+            key={s}
+            type="button"
+            onClick={() => set('store', s)}
+            className={chip(s === 'All shops' ? !current.store : current.store === s)}
+          >
+            {s}
+          </button>
+        ))}
+
+        {stores.length > 1 && <span className="mx-1 h-[22px] w-px bg-line" />}
+
+        {/* By SHIP date, which is the question the operator actually has:
+            "what went out on Tuesday". It narrows whatever tab is selected and
+            combines with the search and the shop, and the counts follow it. */}
+        <label className="flex items-center gap-[7px] text-[11.5px] font-semibold text-muted">
+          Shipped on
+          <input
+            type="date"
+            value={current.date}
+            onChange={(e) => set('date', e.target.value)}
+            aria-label="Shipped on this day"
+            className="rounded border border-line bg-surface px-[8px] py-[6px] text-[12px] text-ink"
+          />
+        </label>
+
+        {current.date && (
+          <button type="button" onClick={() => set('date', '')} className={chip(false)}>
+            Any day
+          </button>
+        )}
+      </div>
     </div>
   );
 }

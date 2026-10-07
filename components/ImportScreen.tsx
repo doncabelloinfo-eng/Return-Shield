@@ -45,8 +45,12 @@ export function ImportScreen() {
           }}
           className="rounded-md border-2 border-dashed border-line bg-surface p-8 text-center"
         >
-          <div className="text-[14.5px] font-semibold text-ink">Drop a TikTok CSV or XLSX here</div>
-          <div className="mt-[5px] text-[12.5px] text-muted">
+          <div className="text-[14.5px] font-semibold text-ink">Drop a TikTok or Amazon file here</div>
+          <div className="mt-[5px] text-[12.5px] leading-[1.5] text-muted">
+            The shipping-confirmation export, as it comes — <span className="font-mono">.txt</span>,{' '}
+            <span className="font-mono">.csv</span>, <span className="font-mono">.tsv</span> or{' '}
+            <span className="font-mono">.xlsx</span>. Each row says which marketplace it is from, so
+            one file can hold both.<br />
             Nothing is added until you have looked at what it found.
           </div>
           <button
@@ -60,7 +64,7 @@ export function ImportScreen() {
           <input
             ref={input}
             type="file"
-            accept=".csv,.tsv,.xlsx,.xls"
+            accept=".txt,.csv,.tsv,.xlsx,.xls"
             className="hidden"
             onChange={(e) => { const f = e.target.files?.[0]; if (f) upload(f); }}
           />
@@ -71,7 +75,9 @@ export function ImportScreen() {
             <strong>{result.error}</strong>
             {result.missingColumns?.length ? (
               <div className="mt-1 text-ink">
-                A TikTok export needs these columns:{' '}
+                A shipping-confirmation export needs{' '}
+                <span className="font-mono">order-id, tracking-number, ship-date</span> and a
+                carrier column. A full export needs{' '}
                 <span className="font-mono">order_id, customer_name, phone, address, city,
                 postal_code, shipping_code, order_value, payment_method, shipped_at</span>. Header
                 names are matched loosely, so a renamed column is usually still found — these ones
@@ -100,13 +106,43 @@ export function ImportScreen() {
         <Stat n={s.new} label="New orders" colour="var(--good)" />
         <Stat n={s.duplicate} label="Already had these" colour="var(--muted)" />
         <Stat n={stillBroken} label="Need you" colour={stillBroken ? 'var(--crit)' : 'var(--muted)'} />
-        <div className="flex min-w-[230px] flex-1 items-center bg-goodsoft px-[18px] py-[14px] text-[12.5px] leading-[1.5] text-ink">
-          <span>
-            <strong className="text-good">Fixed {s.autofixed} phone numbers automatically.</strong>{' '}
-            Added +34 where it was missing, stripped spaces and dashes, turned 0034 into +34.
-            {stillBroken > 0 && ` ${stillBroken} ${stillBroken === 1 ? 'is' : 'are'} left that nobody can guess.`}
-          </span>
-        </div>
+
+        {/* "82 TikTok · 1 Amazon". Worked out per row from the order id, never
+            from the file name — one of these files was called "tiktok shop.txt"
+            and people rename them. */}
+        {s.bySource.length > 0 && (
+          <div className="flex min-w-[200px] flex-1 items-center px-[18px] py-[14px] text-[12.5px] leading-[1.5] text-ink">
+            <span>
+              <strong>{s.bySource.map((b) => `${b.count} ${b.label}`).join(' · ')}</strong>
+              <br />
+              <span className="text-muted">worked out from each order number</span>
+            </span>
+          </div>
+        )}
+
+        {result.format === 'tracking' ? (
+          <div className="flex min-w-[250px] flex-1 items-center px-[18px] py-[14px] text-[12.5px] leading-[1.5] text-muted">
+            <span>
+              This file carries no names, phones or addresses — that is normal for a
+              shipping-confirmation export, so a missing phone is not an error here. Contact
+              goes through the marketplace.
+              {s.notCorreos > 0 && (
+                <>
+                  <br />
+                  <strong className="text-ink">{s.notCorreos} skipped: not Correos.</strong>
+                </>
+              )}
+            </span>
+          </div>
+        ) : (
+          <div className="flex min-w-[230px] flex-1 items-center bg-goodsoft px-[18px] py-[14px] text-[12.5px] leading-[1.5] text-ink">
+            <span>
+              <strong className="text-good">Fixed {s.autofixed} phone numbers automatically.</strong>{' '}
+              Added +34 where it was missing, stripped spaces and dashes, turned 0034 into +34.
+              {stillBroken > 0 && ` ${stillBroken} ${stillBroken === 1 ? 'is' : 'are'} left that nobody can guess.`}
+            </span>
+          </div>
+        )}
       </div>
 
       <div className="mt-4 overflow-x-auto rounded-[5px] border border-line bg-surface">
@@ -114,6 +150,7 @@ export function ImportScreen() {
           <thead>
             <tr>
               <Th align="right">Row</Th>
+              <Th>From</Th>
               <Th>Customer</Th>
               <Th>Phone</Th>
               <Th align="right">Value</Th>
@@ -194,8 +231,19 @@ function ImportRow({
       >
         {row.n}
       </td>
+
+      {/* Which marketplace, per row. A badge rather than a column of text,
+          because the useful thing is spotting the odd one out in eighty. */}
+      <td className="whitespace-nowrap border-b border-line px-3 py-[11px]">
+        <SourceBadge source={row.source} />
+      </td>
+
       <td className="whitespace-nowrap border-b border-line px-3 py-[11px] text-[13px] font-medium text-ink">
-        {row.customerName || <span className="text-crit">No name</span>}
+        {row.customerName || (
+          <span className="font-mono text-[12px] text-muted" title="This export carries no names">
+            {row.orderId || '—'}
+          </span>
+        )}
       </td>
       <td className="whitespace-nowrap border-b border-line px-3 py-[11px]">
         <span className={broken
@@ -236,5 +284,37 @@ function ImportRow({
                 : <Chip colour="var(--good)" background="var(--surface)">New</Chip>}
       </td>
     </tr>
+  );
+}
+
+/**
+ * Which marketplace a row came from.
+ *
+ * Grey for the two we recognise and red for the two we do not, because the
+ * failure cases are the ones worth seeing: an order number Excel has destroyed
+ * cannot be recovered, and one in neither shape cannot be placed.
+ */
+function SourceBadge({ source }: { source: PreviewRow['source'] }) {
+  if (source === 'tiktok' || source === 'amazon') {
+    return (
+      <span
+        className="inline-block rounded-[3px] border px-[6px] py-[2px] text-[10.5px] font-semibold"
+        style={{ borderColor: 'var(--line)', background: 'var(--surface2)', color: 'var(--ink)' }}
+      >
+        {source === 'tiktok' ? 'TikTok' : 'Amazon'}
+      </span>
+    );
+  }
+
+  return (
+    <span
+      className="inline-block rounded-[3px] border px-[6px] py-[2px] text-[10.5px] font-semibold"
+      style={{ borderColor: 'var(--crit)', background: 'var(--critsoft)', color: 'var(--crit)' }}
+      title={source === 'excel_damaged'
+        ? 'Excel has rewritten this order number in scientific notation. The digits are gone.'
+        : 'The order number is in neither the Amazon nor the TikTok shape.'}
+    >
+      {source === 'excel_damaged' ? 'Excel damage' : "Can't tell"}
+    </span>
   );
 }

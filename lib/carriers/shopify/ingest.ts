@@ -1,4 +1,4 @@
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql as raw } from 'drizzle-orm';
 import { getDb } from '@/db';
 import { orders, shipments, stores } from '@/db/schema';
 import { normalisePhone } from '@/lib/import/phone';
@@ -65,9 +65,23 @@ export function isCorreos(f: ShopifyFulfilment): boolean {
   return /^[A-Z]{2}\d{9,}ES$/i.test(code.trim());
 }
 
+export interface IngestOrderOptions {
+  /**
+   * Narrate nothing. Used by the thirty-day pull.
+   *
+   * One line per order is right for a webhook — one order arrives, one line
+   * says so — and wrong for a thousand at once: the ticker holds twenty-four
+   * hours, so a pull would bury a whole day of real events under history. The
+   * pull says "Pulled N parcels from the last 30 days of {store}" once
+   * instead.
+   */
+  quiet?: boolean;
+}
+
 export async function ingestShopifyOrder(
   storeKey: string,
   payload: ShopifyOrderPayload,
+  opts: IngestOrderOptions = {},
 ): Promise<IngestOrderResult> {
   const [store] = await getDb().select().from(stores).where(eq(stores.key, storeKey)).limit(1);
   if (!store) throw new Error(`shopify: no store configured with key "${storeKey}"`);
@@ -127,26 +141,58 @@ export async function ingestShopifyOrder(
   }).returning({ id: orders.id });
 
   const created: string[] = [];
+  const existing: string[] = [];
+
   for (const code of unique) {
     const productCode = productCodeOf(fulfilments, code);
+    const shippedAt = fulfilledAt(fulfilments, code);
+
+    /*
+     * An upsert rather than `onConflictDoNothing`, so the thirty-day pull can
+     * give an existing parcel its real ship date. The migration backfilled
+     * every pre-existing row with `created_at`, and the fulfilment's own
+     * `created_at` is the truth — the pull is how those get corrected.
+     *
+     * Nothing else about an existing shipment is touched. `state`,
+     * `state_since` and the deadlines belong to the projection, and writing
+     * them here would be a second source for a column with one owner.
+     *
+     * `xmax = 0` is Postgres' own answer to "was that an insert or an
+     * update", and the distinction matters: a parcel the pull merely re-dated
+     * is not a new parcel, and announcing it would put a thousand lines in the
+     * ticker about history.
+     */
     const [row] = await getDb().insert(shipments).values({
       orderId: order.id,
       carrier: 'correos',
       shippingCode: code,
       productCode,
       state: 'created',
+      shippedAt,
       createdAt: now(),
-    }).onConflictDoNothing({ target: shipments.shippingCode }).returning({ id: shipments.id });
+    }).onConflictDoUpdate({
+      target: shipments.shippingCode,
+      set: { shippedAt: shippedAt ?? raw`${shipments.shippedAt}` },
+    }).returning({ id: shipments.id, fresh: raw<boolean>`(xmax = 0)` });
 
-    if (row) created.push(row.id);
+    if (!row) continue;
+    if (row.fresh) created.push(row.id); else existing.push(row.id);
   }
 
   if (created.length) {
-    await say(`${customerName} — ${payload.name ?? externalOrderId} picked up from ${store.name}`);
+    if (!opts.quiet) {
+      // `created[0]` so the ticker line can link to the parcel. The line was
+      // being written without one, so the one place it would have been useful
+      // — "which parcel is this about" — went nowhere.
+      await say(
+        `${customerName} — ${payload.name ?? externalOrderId} picked up from ${store.name}`,
+        created[0],
+      );
+    }
     return { status: 'created', shipmentIds: created };
   }
 
-  return { status: 'existing', shipmentIds: [] };
+  return { status: 'existing', shipmentIds: existing };
 }
 
 function joinName(a?: string | null, b?: string | null): string {
@@ -175,6 +221,23 @@ function normaliseTags(tags: string | string[] | null | undefined): string[] {
   if (!tags) return [];
   if (Array.isArray(tags)) return tags;
   return tags.split(',').map((t) => t.trim()).filter(Boolean);
+}
+
+/**
+ * When Correos was handed this parcel: the fulfilment's own `created_at`.
+ *
+ * Not the order's. An order placed on the 1st and posted on the 6th is five
+ * days of retention window apart, and the ship date is the one the window
+ * counts from.
+ */
+export function fulfilledAt(fulfilments: ShopifyFulfilment[], code: string): Date | null {
+  const f = fulfilments.find((x) =>
+    x.tracking_number?.trim().toUpperCase() === code
+    || x.tracking_numbers?.some((c) => c.trim().toUpperCase() === code));
+
+  if (!f?.created_at) return null;
+  const at = new Date(f.created_at);
+  return Number.isNaN(at.getTime()) ? null : at;
 }
 
 /** The Correos service, which decides how long the office holds it. */

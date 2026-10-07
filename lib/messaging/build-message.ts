@@ -86,12 +86,43 @@ export function officeDetails(ctx: MessageContext): string {
   const office = ctx.officeName ?? 'tu oficina de Correos';
   const address = ctx.officeAddress ? `, ${ctx.officeAddress}` : '';
   const hours = ctx.officeHours ?? DEFAULT_OFFICE_HOURS;
-  return `Hola ${ctx.firstName}, somos ${ctx.storeName}. `
+
+  /*
+   * Two changes for the marketplace parcels, and only these two.
+   *
+   * The greeting drops the name when there is none. These files carry no
+   * customer details, and the importer used to supply "Unknown customer", so
+   * the message opened "Hola Unknown" — `firstName` takes the first word of
+   * whatever is there.
+   *
+   * And `somos {store}` goes, because the message is pasted into Amazon's or
+   * TikTok's own chat, which already shows the seller. "Somos Amazon ES" would
+   * be us claiming to be the marketplace.
+   */
+  const greeting = ctx.firstName.trim() ? `Hola ${ctx.firstName.trim()}` : 'Hola';
+  const who = ctx.viaMarketplace ? '' : `, somos ${ctx.storeName}`;
+
+  return `${greeting}${who}. `
     + `Tu pedido ${ctx.orderNumber} te espera en ${office}${address}. `
     + `Horario: ${hours}. `
     + `Enseña este código: ${ctx.shippingCode}. `
     + `Último día para recogerlo: ${deadline}. `
     + 'Si no puedes ir, dínoslo y lo reenviamos.';
+}
+
+/**
+ * The subject line of the email version, so the wording has one home like
+ * every other word a customer reads.
+ */
+export function officeEmailSubject(orderNumber: string): string {
+  return `Tu pedido ${orderNumber} te espera en Correos`;
+}
+
+/** A `mailto:` with the subject and the office text, both encoded. */
+export function emailLink(to: string, subject: string, body: string): string {
+  return `mailto:${encodeURIComponent(to)}`
+    + `?subject=${encodeURIComponent(subject)}`
+    + `&body=${encodeURIComponent(body)}`;
 }
 
 /** The wa.me link behind "Open WhatsApp". Digits only, then the text. */

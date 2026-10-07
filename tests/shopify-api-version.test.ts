@@ -165,8 +165,14 @@ describe('the backfill', () => {
 
     const url = new URL(urls[0]);
     expect(url.searchParams.get('status')).toBe('any');
-    expect(url.searchParams.get('fulfillment_status')).toBe('shipped');
-    expect(url.searchParams.get('limit')).toBe('100');
+    /*
+     * `any`, not `shipped`. A partially fulfilled order is `partial`, and its
+     * posted parcel is as real as any other — `shipped` left those out.
+     */
+    expect(url.searchParams.get('fulfillment_status')).toBe('any');
+    // 250, Shopify's own ceiling. It asked for 100 and read one page, which at
+    // a thousand parcels a day was a fraction of two days of orders.
+    expect(url.searchParams.get('limit')).toBe('250');
     // Two days before the test clock, to the millisecond, as an ISO string.
     expect(url.searchParams.get('updated_at_min')).toBe('2026-10-04T08:00:00.000Z');
   });

@@ -43,6 +43,13 @@
       "when": 1791327383768,
       "tag": "0005_parcels_closures_retention",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1791331696111,
+      "tag": "0006_ship_date",
+      "breakpoints": true
     }
   ]
 }

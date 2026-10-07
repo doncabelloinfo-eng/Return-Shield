@@ -4,6 +4,7 @@ import { ParcelTabs } from '@/components/ParcelTabs';
 import { ParcelSearch } from '@/components/ParcelSearch';
 import { ParcelsTable } from '@/components/ParcelsTable';
 import { ClosuresPanel } from '@/components/ClosuresPanel';
+import { ContactTable } from '@/components/ContactTable';
 import { Pager } from '@/components/Pager';
 import { PageHeading, Empty } from '@/components/ui';
 
@@ -25,16 +26,21 @@ export default async function ParcelsPage({
   searchParams,
 }: {
   searchParams: {
-    status?: string; q?: string; store?: string; page?: number | string;
+    status?: string; q?: string; store?: string; date?: string; page?: number | string;
     reason?: string; month?: string;
   };
 }) {
   const page = Number(searchParams.page ?? 1) || 1;
   const q = searchParams.q ?? '';
   const store = searchParams.store ?? '';
+  const date = searchParams.date ?? '';
 
-  const view = await parcelsView({ status: searchParams.status, q, store, page });
+  const view = await parcelsView({ status: searchParams.status, q, store, date, page });
   const onClosed = view.tab.id === 'closed';
+  // The missed-delivery tab is a worklist, not an inventory: it shows the
+  // contact columns instead of the status ones, because every row of it is
+  // somebody to ring today.
+  const onContact = view.tab.id === 'missed_delivery';
 
   // The closed tab is backed by `closures`, not by `shipments`: that table is
   // the one the thirty-day cleanup never touches, so it still has the
@@ -55,7 +61,7 @@ export default async function ParcelsPage({
       <div className="flex flex-wrap items-end gap-[14px]">
         <PageHeading title="Parcels" note={heading} />
         {!onClosed && (
-          <ParcelSearch stores={view.stores} current={{ q, store }} />
+          <ParcelSearch stores={view.stores} current={{ q, store, date }} />
         )}
       </div>
 
@@ -73,11 +79,20 @@ export default async function ParcelsPage({
               month: searchParams.month ?? '',
             }}
           />
+        ) : onContact ? (
+          <>
+            <ContactTable rows={view.rows} />
+            {view.rows.length > 0 && (
+              <div className="mt-[2px] rounded-[5px] border border-line bg-surface">
+                <Pager page={view.page} pages={view.pages} total={view.total} pageSize={PAGE_SIZE} />
+              </div>
+            )}
+          </>
         ) : (
           <>
             <ParcelsTable
               rows={view.rows}
-              empty={<Empty good>{emptyFor(view.tab.id, q || store)}</Empty>}
+              empty={<Empty good>{emptyFor(view.tab.id, q || store || date)}</Empty>}
             />
             {view.rows.length > 0 && (
               <div className="mt-[2px] rounded-[5px] border border-line bg-surface">
@@ -105,6 +120,13 @@ function headingFor(
     return `${total} with a label printed and nothing from Correos for two working days`
       + ' · weekends do not count';
   }
+  if (tab === 'stuck_same_status') {
+    return `${total} that have said the same thing for three working days`
+      + ' · delivery takes two to three, so these have stopped moving';
+  }
+  if (tab === 'missed_delivery') {
+    return `${total} to contact today — Correos tried, nobody took it, and the countdown is running`;
+  }
   if (tab === 'stuck_30') {
     return `${total} past the cleanup window and still going — these are kept until they finish`;
   }
@@ -119,6 +141,7 @@ function headingFor(
 function emptyFor(tab: string, filtered: boolean | string): string {
   if (filtered) return 'Nothing in this status matches what you typed.';
   if (tab === 'stuck_pre_admission') return 'Nothing is stuck in pre-admission. Correos has taken everything.';
+  if (tab === 'stuck_same_status') return 'Everything is still moving. Nothing has been in one status for three working days.';
   if (tab === 'stuck_30') return 'Nothing is older than the cleanup window and still unfinished.';
   if (tab === 'to_review') return 'Correos has not said anything we do not recognise.';
   if (tab === 'all_open') return 'Every parcel is finished.';

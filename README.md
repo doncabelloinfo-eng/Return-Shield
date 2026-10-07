@@ -251,14 +251,27 @@ tracked, correct, moving normally through Correos, and on no screen at all.
 Today lists only parcels with a next action and Post office only `at_office`,
 so a parcel simply in transit was invisible.
 
-Two tabs are not a status but a problem:
+Four tabs are not a status but a problem:
 
 - **Stuck in pre-admission** — a label printed and nothing from Correos for two
   **working** days. Weekends never count: Correos does not admit parcels on a
   Saturday and the warehouse does not hand them over, so a Friday label is not
   late on Monday. Flagging it would teach the operator to ignore the badge.
+- **Same status 3+ working days** — delivery takes two to three, so a parcel
+  that has said the same thing for three full working days has stopped moving
+  without Correos saying anything is wrong.
+- **Missed delivery, at the post office** — Correos tried, nobody took it, and
+  it is now sitting at an office with a countdown running. These are the
+  customers to ring today, so the row carries the phone, the WhatsApp link with
+  the finished Spanish text, the email, the office and its address, the last
+  day and the number of attempts. A parcel sent *straight* to an office the
+  customer chose is not here; nobody missed anything.
 - **Stuck 30+ days, not finished** — past the cleanup window and still going.
   These are kept rather than deleted, and this is how anybody finds out.
+
+Columns include **Ordered** and **Shipped**, and the filter bar has a date
+picker that lists what went out on a given Madrid day. The marketplace files
+have no order date, so those rows show "—" rather than the ship date twice.
 
 **The operator reads English.** Every label, tab, badge, button and timeline
 entry leads in English, with Correos' own Spanish underneath in a smaller muted
@@ -291,6 +304,15 @@ expect. The Admin API version is one constant in
 quietly serves the oldest one it still supports, so a stale version here is
 invisible rather than loud.
 
+Orders are read a page at a time, 250 at a time, following Shopify's `Link`
+header to the end — the hourly check used to ask for 100 and read the first
+page only, which at a thousand parcels a day was a fraction of two days of
+orders with nothing to say so. **Settings → Shopify** has a "Pull the last 30
+days" button per shop, which is also how a newly connected shop gets any
+history. History arrives quietly: a parcel delivered before the pull gets no
+ticker line and no task, and none of the reminders that were due while nobody
+was watching.
+
 Adding a store needs no code: a row in `stores`, a webhook made in that store's
 Shopify admin, and an Admin API token from a per-store custom app. The
 procedure is in [docs/deploying.md](docs/deploying.md#adding-a-shopify-store).
@@ -300,6 +322,21 @@ carry `PKA6TP…` codes with no carrier name, so `isCorreos` does not recognise
 them. TikTok comes in through the file upload on the Import screen, and
 teaching `isCorreos` to accept a bare `PKA6TP…` would ingest those orders
 twice.
+
+### Uploading TikTok and Amazon files
+
+**Upload orders** takes the shipping-confirmation export as it comes — `.txt`,
+`.csv`, `.tsv` or `.xlsx`. Both marketplaces export the *same eight columns*,
+so each row's marketplace is worked out from its order id and never from the
+file name: one real file was `Seguimiento_Amazon_07102026_015340.txt` and the
+other `tiktok shop.txt`, and people rename these. A file may hold both kinds.
+
+These files carry no name, phone, email, address or value. That is normal, so a
+missing phone is not an error in one of them — and the parcels are contacted
+through the marketplace's own chat instead. The order number stands in for the
+customer name on the screens, and the Spanish message drops the greeting name
+and the "somos {shop}" accordingly, because it is pasted into a thread that
+already shows the seller.
 
 ### WhatsApp
 

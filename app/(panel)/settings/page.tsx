@@ -1,6 +1,7 @@
-import { sql as raw, eq, desc, isNull } from 'drizzle-orm';
+import { sql as raw, and, eq, desc, isNull } from 'drizzle-orm';
 import { getDb } from '@/db';
-import { eventReviewQueue, postcodeStats, productRules, shipments } from '@/db/schema';
+import { eventReviewQueue, postcodeStats, productRules, shipments, stores } from '@/db/schema';
+import { ShopifyPull } from '@/components/ShopifyPull';
 import { DepositRow } from '@/components/DepositRow';
 import { IntegrationsPanel } from '@/components/IntegrationsPanel';
 import { JobRunsPanel } from '@/components/JobRunsPanel';
@@ -26,7 +27,7 @@ export const runtime = 'nodejs';
  * office list re-sorts straight away.
  */
 export default async function SettingsPage() {
-  const [rules, counts, watched, review, integrations, jobs, batchMode, bytes] = await Promise.all([
+  const [rules, counts, watched, review, integrations, jobs, batchMode, bytes, shopifyStores] = await Promise.all([
     getDb().select().from(productRules).orderBy(productRules.productCode),
     getDb().select({ code: shipments.productCode, n: raw<number>`count(*)::int` })
       .from(shipments).groupBy(shipments.productCode),
@@ -38,6 +39,9 @@ export default async function SettingsPage() {
     jobHealth(),
     getSetting('correosBatchMode'),
     databaseBytes(),
+    getDb().select({ key: stores.key, name: stores.name }).from(stores)
+      .where(and(eq(stores.platform, 'shopify'), eq(stores.active, true)))
+      .orderBy(stores.name),
   ]);
 
   const windowDays = retentionDays();
@@ -141,6 +145,24 @@ export default async function SettingsPage() {
           </table>
         )}
       </div>
+
+      {shopifyStores.length > 0 && (
+        <div className="mt-[22px]">
+          <Card
+            title="Shopify"
+            note={`history, per shop · the last ${windowDays} days`}
+          >
+            {shopifyStores.map((st) => (
+              <ShopifyPull key={st.key} storeKey={st.key} storeName={st.name} windowDays={windowDays} />
+            ))}
+            <div className="px-[14px] py-3 text-[11.5px] leading-[1.5] text-muted">
+              New parcels arrive on their own by webhook, and the hourly check picks up any
+              whose webhook never came. This is for history: the first time a shop is
+              connected, or after a gap.
+            </div>
+          </Card>
+        </div>
+      )}
 
       <div className="mt-[22px]">
         <StoragePanel bytes={bytes} windowDays={windowDays} />

@@ -37,7 +37,7 @@ export const stores = pgTable('stores', {
   // The slug in /api/webhooks/shopify/{key} and the suffix of SHOPIFY_<KEY>_*.
   key: text('key').notNull(),
   name: text('name').notNull(),
-  platform: text('platform').notNull().$type<'shopify' | 'tiktok'>(),
+  platform: text('platform').notNull().$type<'shopify' | 'tiktok' | 'amazon'>(),
   ingest: text('ingest').notNull().$type<'auto' | 'manual'>(),
   shopDomain: text('shop_domain'),
   timezone: text('timezone').notNull().default('Europe/Madrid'),
@@ -84,7 +84,17 @@ export const orders = pgTable('orders', {
   totalValueCents: integer('total_value_cents').notNull().default(0),
   currency: text('currency').notNull().default('EUR'),
   paymentMethod: text('payment_method').notNull().$type<'prepaid' | 'cod'>(),
-  placedAt: timestamp('placed_at', { withTimezone: true }).notNull(),
+  /**
+   * When the customer placed the order. Shopify's order `created_at`.
+   *
+   * Nullable because the marketplace tracking files genuinely do not have it:
+   * Amazon's and TikTok's shipping-confirmation exports carry a ship date and
+   * no order date. The importer used to write the ship date here, which made
+   * the two columns on the Parcels screen say the same thing and quietly
+   * claimed an order was placed the day it was posted. A null the screen shows
+   * as "—" is the honest answer.
+   */
+  placedAt: timestamp('placed_at', { withTimezone: true }),
   tags: jsonb('tags').$type<string[]>().notNull().default([]),
   // Set when a parcel of theirs has come back. Survives the order it came from.
   repeatRisk: boolean('repeat_risk').notNull().default(false),
@@ -140,6 +150,21 @@ export const shipments = pgTable('shipments', {
   // Did the customer ever answer a message or tap the action page?
   reacted: boolean('reacted').notNull().default(false),
   /**
+   * The day the parcel was handed to Correos.
+   *
+   * Three sources, in order of how much they are worth: the Shopify
+   * fulfilment's `created_at`, the `ship-date` column of a marketplace file,
+   * or — when neither exists — the Prerregistrado event, falling back to when
+   * we first saw the row.
+   *
+   * This is what the retention window measures from, and that is the reason it
+   * exists rather than reusing `orders.created_at`. A thirty-day pull from
+   * Shopify writes every order with today's `created_at`, so a window counted
+   * from that would keep a parcel posted five weeks ago for another thirty
+   * days — and the first pull would hold the whole month twice over.
+   */
+  shippedAt: timestamp('shipped_at', { withTimezone: true }),
+  /**
    * When the reconcile sweep last asked Correos about this parcel.
    *
    * This is the sweep's cursor. Ordering by it, nulls first, means a run that
@@ -160,6 +185,9 @@ export const shipments = pgTable('shipments', {
   reconcileIdx: index('shipments_reconcile_idx').on(t.lastReconciledAt),
   // The "Closed by hand" tab and the retention sweep both ask this.
   droppedIdx: index('shipments_dropped_idx').on(t.droppedAt),
+  // The retention window, the "Stuck 30+ days" tab and the date filter all
+  // select on the ship date.
+  shippedIdx: index('shipments_shipped_idx').on(t.shippedAt),
 })).enableRLS();
 
 /**

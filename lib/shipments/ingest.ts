@@ -5,7 +5,7 @@ import {
 } from '@/db/schema';
 import { matchCorreosEvent } from '@/lib/carriers/correos/state-map';
 import type { ShipmentState } from '@/lib/state-machine/states';
-import { RETURN_STATES } from '@/lib/state-machine/states';
+import { RETURN_STATES, TERMINAL_STATES } from '@/lib/state-machine/states';
 import { now } from '@/lib/clock';
 import { say } from '@/lib/activity';
 import { money } from '@/lib/escalation/decide';
@@ -50,7 +50,27 @@ export interface IngestResult {
   stateChanged?: boolean;
 }
 
-export async function ingestEvent(ev: IncomingEvent): Promise<IngestResult> {
+export interface IngestOptions {
+  /**
+   * History, not news. Write the event and recompute the state, but fire none
+   * of the side effects: no ticker line, no task, no alert.
+   *
+   * This exists for the thirty-day pull. A parcel whose whole life arrives in
+   * one go would otherwise narrate every step of it — "nobody home, reminders
+   * started", "now at the post office", "delivered, closed itself" — for
+   * something that finished a fortnight ago. A thousand of those would bury a
+   * whole day of real events in a ticker that holds twenty-four hours.
+   *
+   * The caller decides once, at the end, what the parcel needs NOW. See
+   * `settleHistory`.
+   */
+  quiet?: boolean;
+}
+
+export async function ingestEvent(
+  ev: IncomingEvent,
+  opts: IngestOptions = {},
+): Promise<IngestResult> {
   const [ship] = await getDb().select({ id: shipments.id, state: shipments.state })
     .from(shipments).where(eq(shipments.shippingCode, ev.shippingCode)).limit(1);
 
@@ -94,9 +114,57 @@ export async function ingestEvent(ev: IncomingEvent): Promise<IngestResult> {
   const before = ship.state as ShipmentState;
   const after = (await reproject(ship.id)).state;
 
-  if (after !== before) await onStateEntered(ship.id, before, after);
+  if (after !== before && !opts.quiet) await onStateEntered(ship.id, before, after);
 
   return { status: 'inserted', shipmentId: ship.id, mappedState: mapped, stateChanged: after !== before };
+}
+
+/**
+ * Decide, once, what a parcel whose history just arrived needs today.
+ *
+ * Call this after replaying a parcel's events with `{ quiet: true }`.
+ *
+ * Two rules, and they are the whole point of the function:
+ *
+ * A parcel that was already finished before the pull gets NOTHING. No ticker
+ * line, no task, no return alert. It was delivered a fortnight ago; saying so
+ * now would be news about nothing, and a "put it back in stock" task for a
+ * parcel that came back last month is a task nobody can do.
+ *
+ * A parcel that still needs a person gets exactly what a new event of that
+ * state would give it today — the task and the one line — and then every
+ * message rung whose due time is in the past is marked fired. Otherwise the
+ * first tick would send a customer the four reminders they should have had
+ * last week, all at once, about a parcel they may already have collected.
+ * The final warning stays armed, because that one is still ahead of them.
+ */
+export async function settleHistory(shipmentId: string): Promise<'finished' | 'needs_person' | 'quiet'> {
+  const [ship] = await getDb().select({ state: shipments.state, dropped: shipments.droppedAt })
+    .from(shipments).where(eq(shipments.id, shipmentId)).limit(1);
+  if (!ship) return 'quiet';
+
+  const state = ship.state as ShipmentState;
+
+  if (TERMINAL_STATES.has(state) || ship.dropped !== null) {
+    // Silenced completely: nothing is owed on a parcel that is already over.
+    await silence(shipmentId, { keepFinal: false });
+    return 'finished';
+  }
+
+  const needsPerson = state === 'failed' || state === 'bad_address'
+    || state === 'at_office' || state === 'refused' || state === 'returning';
+
+  if (needsPerson) {
+    await onStateEntered(shipmentId, 'created', state);
+    // After, not before: `onStateEntered` arms the ladder for this state, and
+    // this is what drops the rungs that were due while we were not looking.
+    await silence(shipmentId, { keepFinal: true });
+    return 'needs_person';
+  }
+
+  // Moving normally. Nothing is owed and nothing needs silencing — the ladder
+  // only has rungs once something has gone wrong.
+  return 'quiet';
 }
 
 /**

@@ -8,7 +8,7 @@ import { now, DAY, HOUR } from '@/lib/clock';
 import { madridParts, madridMidnightUtc, madridDateKey, human, shortDate } from '@/lib/time';
 import { normalisePayload } from '@/lib/carriers/correos/normalise';
 import { MAX_BATCH, trackpub } from '@/lib/carriers/correos/trackpub';
-import { ingestEvent } from '@/lib/shipments/ingest';
+import { ingestEvent, settleHistory } from '@/lib/shipments/ingest';
 import { liveShipmentIds } from '@/lib/shipments/repo';
 import { runTick } from '@/lib/escalation/run';
 import { openTask } from '@/lib/escalation/tasks';
@@ -20,7 +20,7 @@ import { purgeRateLimits } from '@/lib/rate-limit';
 import { callQueue, money } from '@/lib/escalation/decide';
 import { loadRows, todayView } from '@/lib/views/rows';
 import { storeEnv } from '@/lib/carriers/shopify/verify';
-import { ingestShopifyOrder, type ShopifyOrderPayload } from '@/lib/carriers/shopify/ingest';
+import { pullStore } from '@/lib/carriers/shopify/pull';
 import { envNumber, envOr } from '@/lib/env';
 import { adminApiUrl } from '@/lib/carriers/shopify/api';
 
@@ -188,6 +188,15 @@ export interface ReconcileOptions {
   batchSize?: number;
   /** Stop starting new requests after this long, so the run always finishes. */
   budgetMs?: number;
+  /**
+   * Only parcels Correos has never been asked about.
+   *
+   * Used straight after a thirty-day pull: a thousand freshly created parcels
+   * would otherwise sit in Pre-admission for up to three hours waiting for the
+   * next scheduled sweep, which is the whole window in which somebody could
+   * still save the ones already sitting at a post office.
+   */
+  onlyUnswept?: boolean;
 }
 
 /**
@@ -246,11 +255,20 @@ export async function reconcile(opts: ReconcileOptions = {}): Promise<JobResult>
     id: shipments.id,
     code: shipments.shippingCode,
     state: shipments.state,
+    /**
+     * Never asked about before, so whatever Correos is about to tell us is
+     * HISTORY rather than news. A parcel pulled from thirty days back may have
+     * been delivered a fortnight ago; narrating every step of that, and firing
+     * the reminders that were due while we were not looking, is what
+     * `settleHistory` exists to prevent.
+     */
+    firstRead: raw<boolean>`${shipments.lastReconciledAt} IS NULL`,
   })
     .from(shipments)
     .where(and(
       isNull(shipments.droppedAt),
       notInArray(shipments.state, ['delivered', 'collected', 'returned']),
+      opts.onlyUnswept ? isNull(shipments.lastReconciledAt) : undefined,
     ))
     .orderBy(
       raw`CASE WHEN ${shipments.state} IN ('failed', 'at_office', 'bad_address') THEN 0 ELSE 1 END ASC`,
@@ -260,6 +278,16 @@ export async function reconcile(opts: ReconcileOptions = {}): Promise<JobResult>
     .limit(batchSize);
 
   const byCode = new Map(queue.map((q) => [q.code.toUpperCase(), q.id]));
+  const firstRead = new Set(queue.filter((q) => q.firstRead).map((q) => q.code.toUpperCase()));
+  let settledHistory = 0;
+  /**
+   * Events that were genuinely new to a parcel we were already watching.
+   *
+   * Counted apart from `recovered`, which includes a pulled parcel's entire
+   * past: "found 4,000 updates that had not reached us" would be true and
+   * useless on the day of a thirty-day pull.
+   */
+  let news = 0;
 
   let asked = 0;
   let recovered = 0;
@@ -292,10 +320,27 @@ export async function reconcile(opts: ReconcileOptions = {}): Promise<JobResult>
       asked += 1;
 
       if (one.ok) {
+        const history = firstRead.has(code);
+
         for (const event of one.outcome.events) {
-          const ingested = await ingestEvent(event);
-          if (ingested.status === 'inserted') recovered += 1;
+          // Quiet for a first read: write the event, recompute the state, and
+          // narrate nothing. What the parcel needs today is decided once,
+          // below, rather than once per event of its past.
+          const ingested = await ingestEvent(event, { quiet: history });
+          if (ingested.status === 'inserted') {
+            recovered += 1;
+            if (!history) news += 1;
+          }
         }
+
+        if (history) {
+          const id = byCode.get(code);
+          if (id) {
+            const outcome = await settleHistory(id);
+            if (outcome !== 'quiet') settledHistory += 1;
+          }
+        }
+
         answered.push(code);
         continue;
       }
@@ -338,8 +383,14 @@ export async function reconcile(opts: ReconcileOptions = {}): Promise<JobResult>
   // run does not have to probe for it again.
   if (client.mode !== knownMode) await setSetting('correosBatchMode', client.mode);
 
-  if (recovered > 0) {
-    await say(`Check with Correos found ${recovered} updates that had not reached us`);
+  /*
+   * Only count what was genuinely news. A first read of a pulled parcel brings
+   * in its whole past, so `recovered` would be twenty events about a parcel
+   * delivered a fortnight ago — "found 4,000 updates that had not reached us"
+   * is true and useless.
+   */
+  if (news > 0) {
+    await say(`Check with Correos found ${news} updates that had not reached us`);
   }
 
   const [remaining] = await getDb().select({ n: raw<number>`count(*)::int` })
@@ -356,6 +407,7 @@ export async function reconcile(opts: ReconcileOptions = {}): Promise<JobResult>
   return {
     detail: {
       asked,
+      ...(news !== recovered ? { news } : {}),
       recovered,
       missing,
       requests,
@@ -364,6 +416,7 @@ export async function reconcile(opts: ReconcileOptions = {}): Promise<JobResult>
       ...(client.diagnosis ? { batchNote: client.diagnosis } : {}),
       stillToCheck: remaining?.n ?? 0,
       tookMs: Date.now() - elapsedFrom,
+      ...(settledHistory ? { settledHistory } : {}),
       ...(stoppedEarly ? { stoppedEarly } : {}),
       ...(failures.length ? { failures: failures.slice(0, 10) } : {}),
     },
@@ -578,30 +631,29 @@ export async function shopifyBackfill(): Promise<JobResult> {
 
     if (!token || !domain) { skipped.push(store.key); continue; }
 
-    const since = new Date(now().getTime() - 2 * DAY).toISOString();
-    const url = adminApiUrl(domain, 'orders.json', {
-      status: 'any',
-      fulfillment_status: 'shipped',
-      updated_at_min: since,
-      limit: '100',
+    /*
+     * The same paged reader the thirty-day pull uses, because the hourly check
+     * had the same two bugs.
+     *
+     * It asked for `limit: 100` and read the FIRST PAGE ONLY. Two days of
+     * orders at a thousand parcels a day is several hundred, so it was looking
+     * at a fraction of them and reporting success — and Shopify says nothing
+     * when a page ends early, it simply ends.
+     *
+     * And it filtered `fulfillment_status=shipped`, which leaves out partially
+     * fulfilled orders. An order with one item posted and one still to pack is
+     * `partial`, and its posted parcel is as real as any other.
+     */
+    const report = await pullStore(store.key, {
+      from: new Date(now().getTime() - 2 * DAY),
+      // Well inside the route's 120s maxDuration, and the pull is resumable:
+      // anything it does not reach, the next hour's run picks up.
+      budgetMs: 90_000,
     });
 
-    try {
-      const res = await fetch(url, {
-        headers: { 'X-Shopify-Access-Token': token, Accept: 'application/json' },
-        signal: AbortSignal.timeout(20_000),
-      });
-      if (!res.ok) { skipped.push(`${store.key} (${res.status})`); continue; }
-
-      const body = await res.json() as { orders?: ShopifyOrderPayload[] };
-      for (const order of body.orders ?? []) {
-        checked += 1;
-        const r = await ingestShopifyOrder(store.key, order);
-        created += r.shipmentIds.length;
-      }
-    } catch (err) {
-      skipped.push(`${store.key} (${err instanceof Error ? err.message : 'unreachable'})`);
-    }
+    checked += report.checked;
+    created += report.added;
+    if (report.stoppedEarly) skipped.push(`${store.key} (${report.stoppedEarly})`);
   }
 
   if (created > 0) {
@@ -613,7 +665,13 @@ export async function shopifyBackfill(): Promise<JobResult> {
 
 /* ------------------------------------------------------------- 09:00 Madrid */
 
-/** Nudges if it has been more than a day since the last TikTok upload. */
+/**
+ * Nudges if it has been more than a day since the last marketplace upload.
+ *
+ * Either kind counts. Amazon and TikTok come in through the same screen and
+ * the same batch table, so an Amazon upload answers the question "is anybody
+ * loading the files" just as well as a TikTok one.
+ */
 export async function importReminder(): Promise<JobResult> {
   const [last] = await getDb().select({ createdAt: importBatches.createdAt })
     .from(importBatches)
@@ -629,13 +687,13 @@ export async function importReminder(): Promise<JobResult> {
 
   await raiseAlert({
     dedupeKey: `import-reminder:${madridDateKey(at)}`,
-    subject: 'Return Shield — TikTok orders have not been uploaded',
+    subject: 'Return Shield — TikTok or Amazon orders have not been uploaded',
     lines: [
       last
-        ? `The last TikTok upload was ${human(last.createdAt, at)}.`
-        : 'No TikTok orders have ever been uploaded.',
+        ? `The last upload was ${human(last.createdAt, at)}.`
+        : 'No TikTok or Amazon orders have ever been uploaded.',
       '',
-      'TikTok parcels are invisible to this system until the file is uploaded, which means',
+      'Those parcels are invisible to this system until the file is uploaded, which means',
       'nobody is watching their countdowns. Shopify orders are unaffected.',
       '',
       `Upload here: ${appUrl()}/import`,

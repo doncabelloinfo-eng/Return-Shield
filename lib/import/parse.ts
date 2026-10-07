@@ -3,20 +3,54 @@ import ExcelJS from 'exceljs';
 import { normalisePhone, type PhoneResult } from './phone';
 
 /**
- * Reading a TikTok export. CSV or XLSX, both messy, both from a system nobody
- * here controls.
+ * Reading a marketplace export. CSV, TSV, TXT or XLSX, all messy, all from
+ * systems nobody here controls.
  *
  * Nothing is written to the database from this file. It produces a preview an
  * operator looks at and confirms — which is the only reason it is safe to be
  * this liberal about what it accepts.
+ *
+ * TWO FILE SHAPES, and the difference matters.
+ *
+ * The FULL shape is the one this started with: name, phone, address, value,
+ * everything needed to chase a customer directly.
+ *
+ * The TRACKING shape is what the operator actually exports — Amazon's and
+ * TikTok's shipping-confirmation files ("Seguimiento"). Eight columns, no
+ * customer details at all: an order id, a tracking number, a ship date, a
+ * carrier and a service. A missing phone is therefore NOT an error in one of
+ * those, and treating it as one would paint every row red and make the preview
+ * useless. Contact for those parcels goes through the marketplace's own chat.
+ *
+ * Amazon and TikTok export the SAME eight columns, so which marketplace a row
+ * came from is worked out per row from the order id. The file name is never
+ * proof: one was `Seguimiento_Amazon_07102026_015340.txt` and the other
+ * `tiktok shop.txt`, and people rename these.
  */
 
+/** The full export: everything needed to chase a customer directly. */
 export const REQUIRED_COLUMNS = [
   'order_id', 'customer_name', 'phone', 'address', 'city',
   'postal_code', 'shipping_code', 'order_value', 'payment_method', 'shipped_at',
 ] as const;
 
+/**
+ * The shipping-confirmation export. No customer details, by design.
+ *
+ * A carrier column is required but either spelling will do: Amazon fills
+ * `carrier-code` and leaves `carrier-name` empty, and uses `carrier-name` when
+ * the code is `Other`.
+ */
+export const TRACKING_REQUIRED_COLUMNS = [
+  'order_id', 'shipping_code', 'shipped_at',
+] as const;
+
 export const OPTIONAL_COLUMNS = ['product_code', 'email', 'province'] as const;
+
+export type FileFormat = 'full' | 'tracking';
+
+/** Which marketplace one row came from. */
+export type RowSource = 'tiktok' | 'amazon' | 'unknown' | 'excel_damaged';
 
 /**
  * TikTok has renamed these columns at least twice. Matching on a normalised
@@ -42,6 +76,10 @@ const HEADER_ALIASES: Record<string, string> = {
   shippedat: 'shipped_at', shipdate: 'shipped_at', shippingtime: 'shipped_at',
   fechaenvio: 'shipped_at', createdtime: 'shipped_at',
   productcode: 'product_code', service: 'product_code', servicio: 'product_code',
+  shipmethod: 'product_code',
+  // The tracking export's own columns.
+  carriercode: 'carrier_code', carriername: 'carrier_name',
+  orderitemid: 'order_item_id', quantity: 'quantity',
   email: 'email', correo: 'email',
   province: 'province', provincia: 'province', state: 'province',
 };
@@ -59,6 +97,8 @@ export interface ParsedFile {
   rows: RawRow[];
   /** Required columns the file simply does not have. */
   missingColumns: string[];
+  /** Which shape it turned out to be. Decides what is required of it. */
+  format: FileFormat;
 }
 
 export async function parseFile(filename: string, bytes: Buffer): Promise<ParsedFile> {
@@ -66,19 +106,52 @@ export async function parseFile(filename: string, bytes: Buffer): Promise<Parsed
   const { headers, rows } = isExcel ? await parseXlsx(bytes) : parseCsv(bytes);
 
   const canonical = headers.map(canonicalHeader);
-  const missingColumns = REQUIRED_COLUMNS.filter((c) => !canonical.includes(c));
+  const format = formatOf(canonical);
+
+  // What a file must have depends on what it is. Demanding a phone column of a
+  // shipping-confirmation export would reject every real file the operator has.
+  const missingColumns = format === 'tracking'
+    ? trackingMissing(canonical)
+    : REQUIRED_COLUMNS.filter((c) => !canonical.includes(c));
 
   const mapped = rows.map((row) => {
     const out: RawRow = {};
     headers.forEach((h, i) => {
       const key = canonical[i];
       const value = row[h];
+      // `key` is empty for the trailing tab Amazon writes after the last
+      // header. That ninth, nameless column is skipped here; papaparse also
+      // reports `TooFewFields` for every row because of it, and those errors
+      // are not read — the rows themselves parse perfectly.
       if (key && value !== undefined && value !== null) out[key] = String(value).trim();
     });
     return out;
   });
 
-  return { headers, rows: mapped, missingColumns };
+  return { headers: headers.filter(Boolean), rows: mapped, missingColumns, format };
+}
+
+/**
+ * Which shape this is.
+ *
+ * A carrier column is the giveaway: the full export has never had one, and the
+ * shipping-confirmation export always does. Checked alongside a tracking
+ * number so a full export that happens to gain a carrier column one day does
+ * not get read as the wrong shape.
+ */
+export function formatOf(canonical: readonly string[]): FileFormat {
+  const hasCarrier = canonical.includes('carrier_code') || canonical.includes('carrier_name');
+  const hasTracking = canonical.includes('shipping_code');
+  const hasCustomer = canonical.includes('customer_name') || canonical.includes('phone');
+  return hasCarrier && hasTracking && !hasCustomer ? 'tracking' : 'full';
+}
+
+function trackingMissing(canonical: readonly string[]): string[] {
+  const missing: string[] = TRACKING_REQUIRED_COLUMNS.filter((c) => !canonical.includes(c));
+  if (!canonical.includes('carrier_code') && !canonical.includes('carrier_name')) {
+    missing.push('carrier-code');
+  }
+  return missing;
 }
 
 function parseCsv(bytes: Buffer): { headers: string[]; rows: RawRow[] } {
@@ -133,6 +206,114 @@ function cellText(v: ExcelJS.CellValue): string {
   return String(v);
 }
 
+/* ----------------------------------------------------- which marketplace */
+
+/**
+ * Amazon or TikTok, from the order id alone.
+ *
+ * The two files have identical headers, so this is the only reliable
+ * difference. Amazon's filled `order-item-id` and `quantity` agree with it,
+ * but a TikTok export with those columns populated one day would then be read
+ * as Amazon — so they are not used.
+ *
+ *   Amazon  404-0000000-0000001   3, 7 and 7 digits with dashes
+ *   TikTok  576900000000000001    18 plain digits (every one seen starts 5769)
+ *
+ * The range is 16 to 20 rather than exactly 18: TikTok's ids are an opaque
+ * sequence and pinning the length is the kind of assumption that breaks
+ * quietly a year later. The `5769` prefix is deliberately NOT required for the
+ * same reason — it is an observation about one seller's orders, not a format.
+ */
+const AMAZON_ORDER_ID = /^\d{3}-\d{7}-\d{7}$/;
+const TIKTOK_ORDER_ID = /^\d{16,20}$/;
+
+/**
+ * What Excel does to a long number when somebody opens the file and saves it:
+ * `576962...` becomes `5.76962E+17` and the original digits are gone for good.
+ * Refusing the row is the only honest answer — there is nothing to recover.
+ */
+const EXCEL_DAMAGED = /^\d(?:\.\d+)?[eE][+-]?\d+$/;
+
+export function detectSource(orderId: string | undefined): RowSource {
+  const id = (orderId ?? '').trim();
+  if (!id) return 'unknown';
+  if (EXCEL_DAMAGED.test(id)) return 'excel_damaged';
+  if (AMAZON_ORDER_ID.test(id)) return 'amazon';
+  if (TIKTOK_ORDER_ID.test(id)) return 'tiktok';
+  return 'unknown';
+}
+
+export const SOURCE_LABEL: Record<RowSource, string> = {
+  tiktok: 'TikTok',
+  amazon: 'Amazon',
+  unknown: 'Unknown',
+  excel_damaged: 'Damaged by Excel',
+};
+
+/** The store key each marketplace's orders go to. */
+export const SOURCE_STORE: Record<'tiktok' | 'amazon', { key: string; name: string; platform: 'tiktok' | 'amazon' }> = {
+  tiktok: { key: 'tiktok-es', name: 'TikTok Shop ES', platform: 'tiktok' },
+  amazon: { key: 'amazon-es', name: 'Amazon ES', platform: 'amazon' },
+};
+
+/* --------------------------------------------------------------- carriers */
+
+/**
+ * Is this parcel actually ours to track?
+ *
+ * **Correos Express is a different company.** It is a separate courier with
+ * its own tracking numbers and its own API, and a parcel of theirs would sit
+ * in this system for ever while the reconcile sweep asked Correos about a code
+ * Correos has never heard of. So it is skipped by name, before the looser
+ * "contains Correos" test.
+ *
+ * `carrier-name` is only consulted when the code says `Other`, which is what
+ * Amazon does for carriers it has no code for.
+ */
+export function isCorreosCarrier(code: string | undefined, name: string | undefined): boolean {
+  const c = (code ?? '').trim();
+  const effective = /^other$/i.test(c) ? (name ?? '').trim() : (c || (name ?? '').trim());
+  const flat = effective.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+
+  if (!flat) return false;
+  if (/correos\s*express/.test(flat)) return false;
+  return /correos/.test(flat);
+}
+
+export function carrierNameOf(code: string | undefined, name: string | undefined): string {
+  const c = (code ?? '').trim();
+  if (/^other$/i.test(c)) return (name ?? '').trim() || 'Other';
+  return c || (name ?? '').trim() || 'none given';
+}
+
+/* ---------------------------------------------------------------- service */
+
+/** The three Correos services, and the only place their spellings live. */
+const SERVICES = ['PAQ PREMIUM', 'PAQ ESTÁNDAR', 'PAQ 48'] as const;
+
+/**
+ * `ship-method` to a product code.
+ *
+ * Matched without accents or case, because the files are inconsistent about
+ * "ESTÁNDAR" and "ESTANDAR". Anything unrecognised becomes the standard
+ * service AND is flagged, rather than silently: the product code decides how
+ * many days the office holds the parcel, so a wrong guess moves a real
+ * deadline.
+ */
+export function productCodeOf(shipMethod: string | undefined): { code: string; guessed: boolean } {
+  const flat = (shipMethod ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .toUpperCase().replace(/\s+/g, ' ').trim();
+
+  if (!flat) return { code: 'PAQ ESTÁNDAR', guessed: true };
+
+  for (const service of SERVICES) {
+    const target = service.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
+    if (flat === target) return { code: service, guessed: false };
+  }
+
+  return { code: 'PAQ ESTÁNDAR', guessed: true };
+}
+
 /* -------------------------------------------------------------------------- */
 
 export type RowStatus = 'new' | 'duplicate' | 'fixed' | 'needs_you';
@@ -141,6 +322,12 @@ export interface PreviewRow {
   /** Line number in the file the operator is looking at. */
   n: number;
   orderId: string;
+  /** Which marketplace this row's order id says it came from. */
+  source: RowSource;
+  /** Whether the service had to be guessed. Shown in the preview. */
+  serviceGuessed: boolean;
+  /** The carrier the file named, for the "Not Correos" message. */
+  carrier: string;
   customerName: string;
   phone: PhoneResult;
   address: string;
@@ -163,6 +350,10 @@ export interface PreviewSummary {
   duplicate: number;
   needsYou: number;
   autofixed: number;
+  /** Skipped because the carrier is somebody else's. */
+  notCorreos: number;
+  /** "82 TikTok · 1 Amazon" — a count per marketplace. */
+  bySource: { source: RowSource; label: string; count: number }[];
 }
 
 /**
@@ -173,15 +364,29 @@ export interface PreviewSummary {
 export function buildPreview(
   rows: readonly RawRow[],
   knownShippingCodes: ReadonlySet<string>,
+  format: FileFormat = 'full',
 ): { rows: PreviewRow[]; summary: PreviewSummary } {
   const seen = new Set<string>();
   const out: PreviewRow[] = [];
+  const tracking = format === 'tracking';
 
   rows.forEach((r, i) => {
     const shippingCode = (r.shipping_code ?? '').trim().toUpperCase();
     const phone = normalisePhone(r.phone);
+    const orderId = (r.order_id ?? '').trim();
+    const source = tracking ? detectSource(orderId) : 'unknown';
+    const service = productCodeOf(r.product_code);
+    const carrier = carrierNameOf(r.carrier_code, r.carrier_name);
 
-    const duplicate = shippingCode !== '' && (knownShippingCodes.has(shippingCode) || seen.has(shippingCode));
+    /*
+     * A tracking number that repeats inside one file is the same parcel seen
+     * again, not a duplicate to warn about: Amazon writes one row per ITEM, so
+     * a two-item order is two rows with one tracking number. Within a file
+     * that is normal and silent; against the database it is a real duplicate
+     * and the operator should see it.
+     */
+    const repeatedInFile = shippingCode !== '' && seen.has(shippingCode);
+    const alreadyHave = shippingCode !== '' && knownShippingCodes.has(shippingCode);
     if (shippingCode) seen.add(shippingCode);
 
     let status: RowStatus;
@@ -190,8 +395,28 @@ export function buildPreview(
     if (!shippingCode) {
       status = 'needs_you';
       error = 'No tracking code — nothing to follow';
-    } else if (duplicate) {
+    } else if (tracking && source === 'excel_damaged') {
+      // `5.76962E+17`. The digits are gone and cannot be recovered.
+      status = 'needs_you';
+      error = `Excel has destroyed this order number ("${orderId}"). `
+        + 'Export the file again and do not open it in Excel.';
+    } else if (tracking && source === 'unknown') {
+      status = 'needs_you';
+      error = "Can't tell whether this is a TikTok or an Amazon order";
+    } else if (tracking && !isCorreosCarrier(r.carrier_code, r.carrier_name)) {
+      // Correos Express is a different company with its own tracking.
+      status = 'needs_you';
+      error = `Not Correos — the carrier is "${carrier}"`;
+    } else if (alreadyHave || repeatedInFile) {
       status = 'duplicate';
+    } else if (tracking) {
+      /*
+       * No phone is EXPECTED here. The shipping-confirmation export carries no
+       * customer details at all, so judging these rows on a phone number would
+       * paint every single one red and make the preview worthless. Contact for
+       * these parcels goes through the marketplace's own chat.
+       */
+      status = 'new';
     } else if (phone.status === 'ok') {
       status = phone.fixes.length ? 'fixed' : 'new';
     } else {
@@ -201,7 +426,10 @@ export function buildPreview(
 
     out.push({
       n: i + 2, // +1 for the header row, +1 because people count from one
-      orderId: (r.order_id ?? '').trim(),
+      orderId,
+      source,
+      serviceGuessed: tracking && service.guessed,
+      carrier,
       customerName: (r.customer_name ?? '').trim(),
       phone,
       address: (r.address ?? '').trim(),
@@ -209,14 +437,25 @@ export function buildPreview(
       postalCode: (r.postal_code ?? '').trim(),
       shippingCode,
       valueCents: parseMoneyCents(r.order_value),
-      paymentMethod: parsePayment(r.payment_method),
-      productCode: (r.product_code ?? '').trim() || null,
+      // These files say nothing about payment. Prepaid is the right default:
+      // a marketplace has already taken the money.
+      paymentMethod: tracking ? 'prepaid' : parsePayment(r.payment_method),
+      productCode: tracking ? service.code : ((r.product_code ?? '').trim() || null),
       email: (r.email ?? '').trim() || null,
       shippedAt: parseDate(r.shipped_at),
       status,
       error,
     });
   });
+
+  const counted = out.filter((r) => r.source === 'tiktok' || r.source === 'amazon');
+  const bySource = (['tiktok', 'amazon'] as const)
+    .map((source) => ({
+      source: source as RowSource,
+      label: SOURCE_LABEL[source],
+      count: counted.filter((r) => r.source === source).length,
+    }))
+    .filter((c) => c.count > 0);
 
   return {
     rows: out,
@@ -229,6 +468,8 @@ export function buildPreview(
       // changed the string but fixed nothing — counting it would put a number
       // in the "fixed automatically" headline that still needs a person.
       autofixed: out.filter((r) => r.status === 'fixed').length,
+      notCorreos: out.filter((r) => r.error?.startsWith('Not Correos')).length,
+      bySource,
     },
   };
 }

@@ -131,10 +131,17 @@ nothing deleted anything. One `shipment_events` row carries about 550 bytes of
 raw Correos payload, so a thousand parcels a day is roughly a gigabyte a year —
 the only question was when it would stop, not whether.
 
-So the system holds a **rolling 30 days**. Every night `housekeeping` deletes
-the day that has just become the thirty-first day back: orders whose shipments
-have all finished, and with them (by `ON DELETE CASCADE`) their events, tasks,
-messages and contact log. Also trimmed to the same window: activity lines,
+So the system holds a **rolling 30 days**, counted from the **ship date** —
+the day the parcel was handed to Correos, not the day its row was written.
+That distinction matters the moment history is pulled in: a thirty-day Shopify
+pull writes every order with today's date, so a window counted from the row
+would keep a parcel posted five weeks ago for another thirty days, and the
+first pull would hold two months at once.
+
+Every night `housekeeping` deletes the day that has just become the
+thirty-first day back: orders whose shipments have all finished and whose
+newest ship date is past the cutoff, and with them (by `ON DELETE CASCADE`)
+their events, tasks, messages and contact log. Also trimmed to the same window: activity lines,
 resolved review-queue rows, processed push payloads, delivered alerts, import
 batches and job runs.
 
@@ -300,13 +307,59 @@ Add the variables in Vercel, redeploy, then use **Send test notification** from
 the webhook's own menu in the Shopify admin. It should answer **200**. The
 hourly `shopify-backfill` picks the store up on its own from the row in step 1.
 
+#### Pulling history: "Pull the last 30 days"
+
+**Settings → Shopify** has a button per shop. It reads every page of the last
+thirty days and adds any Correos parcel that is missing, and it is how a newly
+connected shop gets any history at all.
+
+It runs in two steps and shows both: the pull creates the parcels, then a
+second request asks Correos about them. Two requests because both are bounded
+by the same 300-second function limit — a sweep inside the pull would get
+whatever seconds the pull left over, which on a thousand parcels is none. And
+without that second step the parcels sit in Pre-admission until the next
+scheduled sweep, up to three hours later, which for one already waiting at a
+post office is three hours of a countdown nobody can see.
+
+Safe to press twice: shipping codes are unique, so a second press reports
+everything as already there. It never asks for anything older than the
+retention window, because the nightly cleanup would delete it the same night.
+
+History arrives **quietly**. A parcel pulled from three weeks back may have
+been delivered a fortnight ago, so the first sweep writes its events and says
+nothing: no ticker line per order, no task for a parcel that is already
+finished, and none of the reminders that were due while nobody was watching.
+A parcel that still needs a person gets what a new event of that state would
+give it today, once. One ticker line per pull, not one per parcel.
+
 #### TikTok orders are deliberately skipped
 
 Orders that Shopify syncs in from TikTok carry `PKA6TP…` tracking codes with no
 carrier name, so `isCorreos` in `lib/carriers/shopify/ingest.ts` does not
-recognise them and the webhook ignores them. **That is intended** — TikTok
-orders come in through the manual file upload on the Import screen, and making
-`isCorreos` accept a bare `PKA6TP…` would ingest them twice.
+recognise them and the webhook, the hourly check and the thirty-day pull all
+ignore them. **That is intended** — TikTok orders come in through the Upload
+orders screen, and making `isCorreos` accept a bare `PKA6TP…` would ingest them
+twice.
+
+#### Uploading TikTok and Amazon files
+
+**Upload orders** takes the shipping-confirmation export ("Seguimiento") as it
+comes: `.txt`, `.csv`, `.tsv` or `.xlsx`. Amazon and TikTok export the *same
+eight columns*, so which marketplace each row belongs to is worked out from the
+order id — `404-0000000-0000001` is Amazon, eighteen plain digits is TikTok —
+and never from the file name, which people rename. A file may hold both; each
+row goes to its own shop, and the `amazon-es` shop is created the first time an
+Amazon order turns up, the way `tiktok-es` always was.
+
+These files carry **no customer details at all**, so a missing phone is not an
+error in one. Contact for those parcels goes through the marketplace's own chat;
+see `AMAZON_ORDER_URL` and `TIKTOK_ORDER_URL` above.
+
+Two rows are refused rather than guessed: an order id in neither shape, and one
+Excel has rewritten as `5.76962E+17` — that is a file somebody opened and saved
+in Excel, and the digits are gone for good. Carriers other than Correos are
+skipped, Correos Express included: it is a different company with its own
+tracking.
 
 #### Old variables to delete
 
@@ -339,6 +392,8 @@ of sent — visible in the Vercel function logs, but nobody's inbox.
 | Variable | Default |
 |---|---|
 | `DB_POOL_MAX` | 3 on Vercel, 10 elsewhere. Many short-lived instances against one database; a generous pool per instance is how Postgres runs out of connections at 9am. |
+| `AMAZON_ORDER_URL` | Optional, **no default**. A template with `{id}` in it, e.g. `https://sellercentral.amazon.es/orders-v3/order/{id}`. Turns the "Open in Amazon" button on Parcels → Missed delivery into a link; until it is set that button is "Copy order number" instead. Not guessed, because seller-central paths differ per region and account and a wrong one is a 404 at the worst moment. |
+| `TIKTOK_ORDER_URL` | The same for TikTok Shop, e.g. `https://seller-es.tiktok.com/order/detail?order_no={id}`. |
 | `RETENTION_DAYS` | 30. How many days of history the system keeps; the nightly job deletes the day that has just fallen off the end. **Never goes below 14** whatever you set — the escalation ladder runs over a fifteen-day deposit window, so a shorter retention would delete parcels still being chased. A value below the floor is clamped and the job detail says so; a value that is not a number falls back to 30. |
 | `SHOPIFY_API_VERSION` | `2026-10`, from `lib/carriers/shopify/api.ts`. A version Shopify has retired does not fail — it silently serves the oldest one still supported, so this is worth reviewing each year. Set it only to pin an older version on purpose. |
 | `RECONCILE_BATCH_SIZE` | 6000. How many parcels one sweep may consider. At ~5,000 live parcels this is "all of them". |

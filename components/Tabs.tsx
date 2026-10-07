@@ -7,7 +7,7 @@ const TABS = [
   { href: '/today', label: 'Today' },
   { href: '/office', label: 'Post office' },
   { href: '/parcels', label: 'Parcels' },
-  { href: '/import', label: 'Add TikTok orders' },
+  { href: '/import', label: 'Upload orders' },
   { href: '/calls', label: 'Call list' },
   { href: '/settings', label: 'Settings' },
 ];
