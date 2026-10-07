@@ -121,6 +121,52 @@ const DESCRIPTION_ALIASES: Record<string, string> = {
   'intento de entrega. ausente': 'intento de entrega fallido - ausente',
   'finalizado plazo retirada': 'devolucion a origen iniciada',
   'devolucion del envio por finalizacion de plazo de retirada': 'devolucion a origen iniciada',
+
+  /*
+   * Two more from the same traffic, read off `shipment_events` and
+   * `event_review_queue` in production, each unambiguous on its own.
+   *
+   *   "En proceso de devolución" is the parcel on its way back to us, which
+   *   is the same thing `L03D045R` says by code.
+   *
+   *   "Dirección Incorrecta. Se procede a remitir el envío a la oficina de
+   *   referencia" is `bad_address`: the address is wrong and Correos are
+   *   holding the parcel at an office rather than attempting it again. The
+   *   short wording "Dirección incorrecta" is already in the canonical table
+   *   above; this is the full sentence they actually send, which does not
+   *   match the short key.
+   *
+   * NOT mapped, on purpose, and listed here so nobody adds them in passing.
+   * Each one arrived with a code and each is waiting on an answer from
+   * Correos, because the words alone do not settle what we should do:
+   *
+   *   H01R424V  Realizado intento de entrega
+   *   H06P010V  En proceso de entrega
+   *   H06P050V  En proceso de entrega
+   *   G01L010V  Alta en la unidad de reparto
+   *   M010090R  Envío a estacionar
+   *   M01E020R  Envío a estacionar
+   *   M01E320R  Estacionado
+   *   M02E340V  Desestacionado
+   *   M02E360V  Desestacionado
+   *   R010751V  Entrega modificada
+   *
+   * "Realizado intento de entrega" is the one to be most careful with: it says
+   * an attempt was made and NOT whether it succeeded, so reading it as a
+   * failure would start the post-failure ladder on parcels that were
+   * delivered. It is a near-miss for the four `intento de entrega …` keys
+   * above, and it matches none of them.
+   *
+   * "Alta en la unidad de reparto" is the other near-miss, and worth a word.
+   * `'alta en unidad de reparto'` — no "la" — IS mapped, a few lines up, from
+   * Correos' public tracker rather than from their feed. The two normalise to
+   * different keys, so the real event stays in the review queue as asked. Do
+   * NOT tidy them into one: the mapped spelling is our reading of a wording we
+   * saw on a web page, and this one is what the API sends and is still a
+   * question for Correos.
+   */
+  'en proceso de devolucion': 'devolucion a origen iniciada',
+  'direccion incorrecta. se procede a remitir el envio a la oficina de referencia': 'direccion incorrecta',
 };
 
 /**
@@ -147,13 +193,16 @@ const BY_CODE: Record<string, ShipmentState> = {
   // returned to us.
   L03D320R: 'returning',        // "Finalizado plazo retirada" · DEVOLUCION
 
-  // "Intento de entrega. Ausente" is mapped by its wording above and has no
-  // entry here: the payload we have for it was summarised rather than stored
-  // in full, so its code is not confirmed, and a guessed code is worse than a
-  // missing one — it maps silently and wrongly, where a missing one simply
-  // falls through to the wording that is confirmed. `remapKnownEvents` records
-  // the real code against the review-queue row it resolves, so the next round
-  // can read it off the Settings screen rather than guess it either.
+  /*
+   * Read straight out of `shipment_events` and `event_review_queue` in
+   * production, which is also how the first of these finally got its code:
+   * "Intento de entrega. Ausente" was mapped by wording alone last time
+   * because the payload we had was a summary, and `remapKnownEvents` wrote the
+   * real code onto the review-queue row it resolved. Nothing here is a guess.
+   */
+  H01R420V: 'failed',           // "Intento de entrega. Ausente" · EN ENTREGA
+  L03D045R: 'returning',        // "En proceso de devolución" · DEVOLUCION
+  H01R421V: 'bad_address',      // "Dirección Incorrecta. Se procede a remitir…"
 };
 
 /**

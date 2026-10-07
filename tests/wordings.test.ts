@@ -34,6 +34,56 @@ const RETURNING = { code: 'L03D320R', desc: 'Finalizado plazo retirada', phase: 
  */
 const FAILED = { code: 'UNKNOWN-CODE', desc: 'Intento de entrega. Ausente', phase: 'EN ENTREGA' };
 
+/**
+ * The codes read out of `shipment_events` and `event_review_queue` in
+ * production, with the wordings they arrived under.
+ *
+ * `H01R420V` is the real code for "Intento de entrega. Ausente", which the
+ * block above says was missing: `remapKnownEvents` wrote it onto the
+ * review-queue row it resolved by wording, and this is it. `FAILED` keeps its
+ * placeholder because the test it is used in is about the wording standing on
+ * its own when the code is unknown — which is still what happens to any code
+ * Correos has not shown us yet.
+ */
+const REAL = [
+  { code: 'H01R420V', desc: 'Intento de entrega. Ausente', phase: 'EN ENTREGA', state: 'failed' },
+  { code: 'L03D045R', desc: 'En proceso de devolución', phase: 'DEVOLUCION', state: 'returning' },
+  {
+    code: 'H01R421V',
+    desc: 'Dirección Incorrecta. Se procede a remitir el envio a la oficina de referencia',
+    phase: 'EN ENTREGA',
+    state: 'bad_address',
+  },
+] as const;
+
+/**
+ * Codes that arrived with them and are deliberately NOT mapped.
+ *
+ * Every one is waiting on an answer from Correos, because the words alone do
+ * not settle what we should do. Two are near-misses for wordings we DO map and
+ * are the reason this list is a test rather than a comment:
+ *
+ *   "Realizado intento de entrega" says an attempt was made and not whether it
+ *   succeeded. Reading it as a failure would start the post-failure ladder on
+ *   parcels that were delivered.
+ *
+ *   "Alta en la unidad de reparto" differs by one word from
+ *   `'alta en unidad de reparto'`, which IS mapped — from Correos' public
+ *   tracker rather than from their feed. They must stay apart.
+ */
+const IN_REVIEW = [
+  { code: 'H01R424V', desc: 'Realizado intento de entrega' },
+  { code: 'H06P010V', desc: 'En proceso de entrega' },
+  { code: 'H06P050V', desc: 'En proceso de entrega' },
+  { code: 'G01L010V', desc: 'Alta en la unidad de reparto' },
+  { code: 'M010090R', desc: 'Envío a estacionar' },
+  { code: 'M01E020R', desc: 'Envío a estacionar' },
+  { code: 'M01E320R', desc: 'Estacionado' },
+  { code: 'M02E340V', desc: 'Desestacionado' },
+  { code: 'M02E360V', desc: 'Desestacionado' },
+  { code: 'R010751V', desc: 'Entrega modificada' },
+] as const;
+
 beforeEach(resetDb);
 afterAll(closeDb);
 
@@ -87,6 +137,66 @@ describe('the wordings as received', () => {
       expect(mapCorreosEvent(null, desc, null)).toBeNull();
       expect(needsReview(null, desc, null)).toBe(true);
     }
+  });
+});
+
+describe('the codes read out of production', () => {
+  it.each(REAL)('$code ($desc) → $state, by code', ({ code, desc, phase, state }) => {
+    expect(matchCorreosEvent(code, desc, phase)).toEqual({ state, via: 'code' });
+    expect(needsReview(code, desc, phase)).toBe(false);
+  });
+
+  it.each(REAL)('$code also maps on its wording alone', ({ desc, phase, state }) => {
+    // The code is the stable key and the wording is the one we see first, so
+    // both are kept: a code Correos renames still lands on the right state,
+    // and a wording that turns up under a new code does too.
+    expect(mapCorreosEvent(null, desc, phase)).toBe(state);
+  });
+
+  it('reads the full wrong-address sentence, not just the first two words', () => {
+    // "Dirección incorrecta" on its own was already mapped. The sentence
+    // Correos actually sends is longer and matches none of the short keys.
+    const full = 'Dirección Incorrecta. Se procede a remitir el envio a la oficina de referencia';
+    expect(normaliseDesc(full))
+      .toBe('direccion incorrecta. se procede a remitir el envio a la oficina de referencia');
+    expect(mapCorreosEvent(null, full, null)).toBe('bad_address');
+    // And with the accent Correos puts on "envío", which normalising strips.
+    expect(mapCorreosEvent(null, full.replace('envio', 'envío'), null)).toBe('bad_address');
+  });
+
+  it.each(IN_REVIEW)('$code ($desc) stays in review, whatever its phase', ({ code, desc }) => {
+    // Under no phase, and under both phases that now map — a phase match is
+    // enough to keep a parcel moving and never enough to say we recognise the
+    // event, which is the whole point of the queue.
+    for (const phase of [null, 'EN ENTREGA', 'DEVOLUCION', 'EN CAMINO']) {
+      expect(needsReview(code, desc, phase), `${code} with phase ${phase}`).toBe(true);
+      const match = matchCorreosEvent(code, desc, phase);
+      expect(match?.via, `${code} with phase ${phase}`).not.toBe('code');
+      expect(match?.via, `${code} with phase ${phase}`).not.toBe('description');
+    }
+  });
+
+  it('keeps "Realizado intento de entrega" away from the failed-delivery keys', () => {
+    // It says an attempt was made and not whether it succeeded. Reading it as
+    // a failure would start the post-failure ladder on delivered parcels.
+    expect(mapCorreosEvent(null, 'Realizado intento de entrega', null)).toBeNull();
+    // While the four wordings that do mean a failure still map.
+    for (const desc of [
+      'Intento de entrega fallido — ausente',
+      'Intento de entrega fallido',
+      'Destinatario ausente',
+      'Intento de entrega. Ausente',
+    ]) {
+      expect(mapCorreosEvent(null, desc, null), desc).toBe('failed');
+    }
+  });
+
+  it('keeps the two "alta en … unidad de reparto" spellings apart', () => {
+    // One word of difference, and deliberately different answers: the mapped
+    // spelling came off Correos' public tracker, this one is what their API
+    // sends and is still a question for them.
+    expect(mapCorreosEvent(null, 'Alta en unidad de reparto', null)).toBe('in_transit');
+    expect(mapCorreosEvent(null, 'Alta en la unidad de reparto', null)).toBeNull();
   });
 });
 
@@ -217,6 +327,74 @@ describe('moving the parcels that already carry these events', () => {
     expect(again.parcels).toBe(0);
     expect(again.moved).toBe(0);
     expect(await stateOf(f.shipmentId)).toBe('returning');
+  });
+
+  it('moves the parcels carrying the three codes read out of production', async () => {
+    /*
+     * Each one as it sits in the database today: an event whose code we did
+     * not recognise, rescued by its phase or by nothing at all. The states
+     * below are what the operator is looking at right now, which is the point
+     * — nothing happens to these parcels until the map is replayed, and for a
+     * parcel on its way back Correos has nothing further to say.
+     */
+    const cases = [
+      { ship: 'PQ94000001ES', was: 'out_for_delivery', ev: REAL[0], tab: 'failed' },
+      { ship: 'PQ94000002ES', was: 'at_office', ev: REAL[1], tab: 'returning' },
+      { ship: 'PQ94000003ES', was: 'out_for_delivery', ev: REAL[2], tab: 'bad_address' },
+    ] as const;
+
+    const made: Record<string, string> = {};
+    for (const c of cases) {
+      const f = await makeShipment({ shippingCode: c.ship, state: c.was });
+      made[c.ship] = f.shipmentId;
+      await store(f.shipmentId, [{
+        code: c.ev.code,
+        desc: c.ev.desc,
+        phase: c.ev.phase,
+        // What the phase fallback made of it, or null where nothing matched.
+        mappedState: c.was === 'out_for_delivery' ? 'out_for_delivery' : null,
+        at: new Date('2026-10-06T12:00:00Z'),
+      }]);
+      await queueReview(c.ev.code, c.ev.desc);
+    }
+
+    const out = await remapKnownEvents();
+
+    expect(out.moved).toBe(3);
+    expect(out.resolved.sort()).toEqual([
+      'H01R420V → failed',
+      'H01R421V → bad_address',
+      'L03D045R → returning',
+    ]);
+
+    for (const c of cases) {
+      expect(await stateOf(made[c.ship]), c.ev.code).toBe(c.ev.state);
+      expect(await tabIds(c.tab), c.ev.code).toContain(made[c.ship]);
+    }
+
+    // And every review row they came from is answered.
+    const rows = await getDb().select().from(eventReviewQueue);
+    expect(rows.filter((r) => r.resolvedAt === null)).toEqual([]);
+  });
+
+  it('leaves the ten unanswered codes exactly where they are', async () => {
+    const f = await makeShipment({ shippingCode: 'PQ94000004ES', state: 'in_transit' });
+    await store(f.shipmentId, IN_REVIEW.map((e, i) => ({
+      code: e.code,
+      desc: e.desc,
+      phase: 'EN ENTREGA',
+      mappedState: 'out_for_delivery',
+      at: new Date(`2026-10-0${(i % 6) + 1}T0${i % 9}:00:00Z`),
+    })));
+    for (const e of IN_REVIEW) await queueReview(e.code, e.desc);
+
+    const out = await remapKnownEvents();
+
+    expect(out.events).toBe(0);
+    expect(out.resolved).toEqual([]);
+    const rows = await getDb().select().from(eventReviewQueue);
+    expect(rows).toHaveLength(IN_REVIEW.length);
+    expect(rows.every((r) => r.resolvedAt === null)).toBe(true);
   });
 
   it('never un-maps an event the current map does not recognise', async () => {

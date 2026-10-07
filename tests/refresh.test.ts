@@ -9,7 +9,11 @@ vi.mock('@/lib/auth/guard', () => ({ requireUser }));
 // revalidatePath needs a request scope, which there is none of here.
 vi.mock('next/cache', () => ({ revalidatePath: vi.fn() }));
 
-const { refreshFromCorreos, MANUAL_SWEEP_GAP_MS } = await import('@/app/actions/refresh');
+const { refreshFromCorreos } = await import('@/app/actions/refresh');
+// From lib/, not from the action file: a `'use server'` module may export
+// nothing but async functions, and this constant living there was what took
+// every action in that file down. See tests/use-server-exports.test.ts.
+const { MANUAL_SWEEP_GAP_MS, sweepResultLine } = await import('@/lib/refresh');
 const { getDb, getSql } = await import('@/db');
 const { jobRuns, shipmentEvents, shipments } = await import('@/db/schema');
 const { acquireJobLock, releaseJobLock } = await import('@/lib/job-lock');
@@ -72,6 +76,49 @@ afterAll(async () => {
   resetClock();
   vi.unstubAllGlobals();
   await closeDb();
+});
+
+describe('the result line', () => {
+  /*
+   * A pure function, unit-testable now that it lives in lib/ rather than in
+   * the `'use server'` file — which is the second reason for that move, after
+   * the crash. The counts arrive as `Record<string, unknown>` out of
+   * `job_runs.detail`, and `count(*)` comes back from Postgres as a string
+   * often enough to matter.
+   */
+  it('counts parcels and says how many changed', () => {
+    expect(sweepResultLine({ asked: 412, changed: 7 }))
+      .toBe('Checked 412 parcels with Correos · 7 changed');
+  });
+
+  it('says "parcel" for one', () => {
+    expect(sweepResultLine({ asked: 1, changed: 0 }))
+      .toBe('Checked 1 parcel with Correos · 0 changed');
+  });
+
+  it('groups the thousands, because five thousand parcels is the real scale', () => {
+    expect(sweepResultLine({ asked: 5000, changed: 1234 }))
+      .toBe('Checked 5,000 parcels with Correos · 1,234 changed');
+  });
+
+  it('mentions what is left only when the sweep ran out of time', () => {
+    // `stillToCheck` is non-zero on a normal run too — it counts parcels this
+    // run has not re-stamped yet — so it is the `stoppedEarly` flag that makes
+    // it worth saying.
+    expect(sweepResultLine({ asked: 10, changed: 1, stillToCheck: 90 }))
+      .toBe('Checked 10 parcels with Correos · 1 changed');
+    expect(sweepResultLine({ asked: 10, changed: 1, stillToCheck: 1200, stoppedEarly: 'ran out of time' }))
+      .toBe('Checked 10 parcels with Correos · 1 changed · 1,200 still to check — they go first next time');
+  });
+
+  it('reads counts that came back as strings, and survives rubbish', () => {
+    expect(sweepResultLine({ asked: '8', changed: '3' }))
+      .toBe('Checked 8 parcels with Correos · 3 changed');
+    expect(sweepResultLine({}))
+      .toBe('Checked 0 parcels with Correos · 0 changed');
+    expect(sweepResultLine({ asked: 'banana', changed: null }))
+      .toBe('Checked 0 parcels with Correos · 0 changed');
+  });
 });
 
 describe('pressing Refresh', () => {

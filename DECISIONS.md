@@ -637,6 +637,59 @@ alone.
 
 ---
 
+## 6b. A `'use server'` file can only export async functions
+
+The Refresh button shipped broken, and the way it broke is worth keeping.
+
+`app/actions/refresh.ts` carries `'use server'` and exported one constant:
+
+```ts
+export const MANUAL_SWEEP_GAP_MS = 5 * MINUTE;
+```
+
+Next refuses to load such a module at all:
+
+```
+Error: A "use server" file can only export async functions, found number.
+```
+
+Not that one export — **the whole module**. So all three actions in the file
+went down with it: the Refresh button, the Correos check after an upload, and
+the Correos check after a thirty-day pull. Each answered 500 with
+"Application error: a server-side exception has occurred", which is also why
+the eighty-one uploaded TikTok parcels were still sitting in *Pre-admission*.
+
+Three things about it are worth writing down, because each one is the reason it
+got past everything:
+
+- **`npm run build` passes.** Verified by putting the bad export back and
+  building: `✓ Compiled successfully`. The rule is applied when the module is
+  first *loaded*, which is when somebody presses the button in production.
+- **Every page still renders.** `GET /office` is 200; only the action POST is
+  500. So a smoke test that loads the screens sees nothing wrong — and that is
+  exactly what the previous round's verification did.
+- **The unit tests import the actions directly.** Vitest loads them as ordinary
+  ES modules, where the rule does not exist. Every test passed.
+
+So `tests/use-server-exports.test.ts` **reads** the files instead of importing
+them: it finds every file whose first statement is the directive and fails on
+any export that is not an async function — `export const`, `let`, `class`,
+`enum`, a plain `function`, a default, or a re-exported value. `export type`
+and `export interface` are allowed, because they vanish at compile time and
+every action file has them. The test also checks itself against a synthetic
+file that exports a number, so a broken sweep cannot pass by finding nothing.
+
+The rule to keep: **a `'use server'` file holds async functions and types, and
+nothing else.** Constants and pure helpers go in `lib/` — which is where
+`MANUAL_SWEEP_GAP_MS`, the budget and the lease now live, as `lib/refresh.ts`,
+along with `sweepResultLine`, which is better off unit-testable anyway.
+
+And the verification for this round was done by invoking the three actions over
+HTTP against a built server with a stub standing in for Correos, not by loading
+the pages. That is the only check that would have caught it.
+
+---
+
 ## 7. Where I departed from the prototype
 
 The prototype is the specification, and I ported it. These are the places I did
@@ -771,21 +824,28 @@ database so the dashboard and the worker agree about what time it is.
 - **~~The deposit window~~ — settled: there isn't one.** It was a guess and it
   is gone; see section 5. Nothing in the system claims to know when a parcel
   goes back, and Correos tell us when they send one.
-- **Correos event codes.** `BY_CODE` in `state-map.ts` holds the five confirmed
-  against real traffic. Guessing a numeric code is worse than falling back to
-  the wording, because a wrong code maps silently while a missing one asks a
-  human — so one is only added once a stored payload has been seen carrying it.
-  The code for "Intento de entrega. Ausente" is the one still missing: that
-  wording maps correctly by its text, and `remapKnownEvents` records the real
-  code against the review-queue row it resolves, so it can be read off the
-  Settings screen rather than guessed.
+- **Correos event codes.** `BY_CODE` in `state-map.ts` holds the eight
+  confirmed against real traffic. Guessing a numeric code is worse than falling
+  back to the wording, because a wrong code maps silently while a missing one
+  asks a human — so one is only added once a stored payload has been seen
+  carrying it. That loop worked: "Intento de entrega. Ausente" was mapped by
+  wording alone, `remapKnownEvents` wrote its real code onto the review-queue
+  row it resolved, and `H01R420V` came back off the Settings screen.
+- **Ten codes waiting on Correos.** `H01R424V` "Realizado intento de entrega",
+  `H06P010V`/`H06P050V` "En proceso de entrega", `G01L010V` "Alta en la unidad
+  de reparto", `M010090R`/`M01E020R` "Envío a estacionar", `M01E320R`
+  "Estacionado", `M02E340V`/`M02E360V` "Desestacionado" and `R010751V` "Entrega
+  modificada". Two are near-misses worth care: "Realizado intento de entrega"
+  says an attempt was made and *not* whether it succeeded, so reading it as a
+  failure would start the post-failure ladder on delivered parcels; and "Alta
+  en la unidad de reparto" differs by one word from `'alta en unidad de
+  reparto'`, which *is* mapped, from Correos' public tracker rather than from
+  their feed. `tests/wordings.test.ts` holds both apart on purpose.
 - **Office opening hours.** Correos' events carry no office details at all —
   `location` is empty in every sample — so there are no hours for any office,
   and the messages and screens now leave the office out rather than filling the
   gap. `offices.opening_hours` is waiting for an API that exposes them.
-- **Two wordings waiting on Correos:** `Desestacionado` and `Entrega
-  modificada`. Neither meaning is clear from the words alone, so both sit in
-  the review queue on the Settings screen until somebody asks.
+
 - **Which store a TikTok upload belongs to.** Every upload goes to one
   `tiktok-es` store. If you run more than one TikTok shop, the import screen
   needs a picker.
