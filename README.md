@@ -415,15 +415,19 @@ curl -H "Authorization: Bearer $CRON_SECRET" \
 Two things always sit behind the tap-again confirmation, and the system will
 never do them on its own:
 
-- **Send to a new address** — Correos charges for a redirection.
+- **Mark new address as sent to Correos** — a redirection is arranged by a
+  person, Correos charge for it, and closing the task is not undoable.
 - **Stop chasing this one** — nothing brings the parcel back afterwards.
 
 Everything else happens by itself.
 
-The system also never invents a Correos event. When the deposit window runs out
-it flags the parcel and alerts internally; it does not write a return event
-that Correos has not sent. The prototype faked those because it had no Correos
-to talk to.
+The system also never invents a Correos event, and no longer invents a date
+either. It used to work out when a parcel would go back — arrival plus a
+"deposit window" an operator typed in, 15 days, never confirmed with anybody —
+and every countdown, last day and customer message came off it. Correos
+announce the return themselves (`L03D320R`, phase `DEVOLUCION`), so the
+screens show how long a parcel has been at the office and nothing claims to
+know when it leaves. See DECISIONS.md section 5.
 
 ---
 

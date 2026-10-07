@@ -3,8 +3,6 @@
   "crons": [
     { "path": "/api/cron/escalation-tick", "schedule": "*/30 * * * *" },
     { "path": "/api/cron/reconcile", "schedule": "10 */3 * * *" },
-    { "path": "/api/cron/push-drain", "schedule": "*/5 * * * *" },
-    { "path": "/api/cron/push-heartbeat", "schedule": "5 * * * *" },
     { "path": "/api/cron/shopify-backfill", "schedule": "15 * * * *" },
     { "path": "/api/cron/stale-detector", "schedule": "0 * * * *" },
     { "path": "/api/cron/daily-digest", "schedule": "0 * * * *" },

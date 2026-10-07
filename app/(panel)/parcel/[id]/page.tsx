@@ -49,7 +49,7 @@ export default async function ParcelPage({ params }: { params: { id: string } })
     text: RUNG_TEXT[r.base] ?? r.id,
   }));
 
-  const showsCountdown = row.state === 'at_office';
+  const atOffice = row.state === 'at_office';
   const tone = row.countdownTone;
 
   return (
@@ -63,15 +63,19 @@ export default async function ParcelPage({ params }: { params: { id: string } })
         style={{ borderLeft: `4px solid ${tone === 'calm' ? 'var(--line)' : toneColour(tone)}` }}
       >
         <div className="min-w-[180px] flex-none">
+          {/* Days AT the office, counting up from the day Correos said it got
+              there. It used to be "Days left" over a "goes back {date}" line,
+              both worked out from a deposit window nobody had confirmed with
+              Correos — so the biggest number on the page was an invention. */}
           <div className="text-[10px] font-semibold uppercase tracking-[.08em] text-muted">
-            {showsCountdown ? 'Days left' : 'Where it is'}
+            {atOffice ? 'Days at the office' : 'Where it is'}
           </div>
           <div className="mt-[2px] flex flex-wrap items-baseline gap-[10px]">
-            {showsCountdown || row.state === 'returning'
+            {atOffice || row.state === 'returning'
               ? <HeroNumber value={row.countdown} tone={tone} size={70} />
               : <span className="font-display text-[26px] font-bold leading-[1.1] text-ink">{STATE_LABEL[row.state]}</span>}
             <span className="text-[13px] font-medium text-muted" title={row.exactWhen}>
-              {showsCountdown ? `goes back ${row.when}` : row.when}
+              {row.when}
             </span>
           </div>
           <div className="mt-[6px]"><StateChip label={STATE_LABEL[row.state] ?? row.state} tone={tone} /></div>
@@ -126,6 +130,16 @@ export default async function ParcelPage({ params }: { params: { id: string } })
               </a>
             )}
           </div>
+
+          {/* Built from the shop domain and Shopify's numeric order id, both
+              already stored — so there is no variable to set, and a shop with
+              no `shop_domain` simply shows no link rather than a dead one. */}
+          {row.shopifyHref && (
+            <a href={row.shopifyHref} target="_blank" rel="noreferrer"
+              className="rounded border border-line bg-surface2 px-[13px] py-[9px] text-center text-[12px] font-semibold text-ink">
+              Open in Shopify
+            </a>
+          )}
         </div>
       </div>
 
@@ -173,10 +187,14 @@ export default async function ParcelPage({ params }: { params: { id: string } })
             <Card title="Post office">
               <div className="px-[14px] py-3">
                 <div className="text-[13.5px] font-semibold text-ink">{row.officeName}</div>
-                <div className="mt-[3px] text-[12.5px] leading-[1.5] text-muted">
-                  {row.officeAddress}
-                  {row.officeHours && <><br />{row.officeHours}</>}
-                </div>
+                {/* Only what Correos gave us. No invented opening hours: the
+                    line is simply absent when they have not sent any. */}
+                {(row.officeAddress || row.officeHours) && (
+                  <div className="mt-[3px] text-[12.5px] leading-[1.5] text-muted">
+                    {row.officeAddress}
+                    {row.officeHours && <><br />{row.officeHours}</>}
+                  </div>
+                )}
                 <div className="mt-[9px] flex flex-wrap gap-[6px]">
                   <a href={row.mapsHref} target="_blank" rel="noreferrer"
                     className="rounded border border-line bg-surface2 px-[11px] py-2 text-[12px] font-semibold text-ink">

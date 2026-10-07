@@ -28,28 +28,48 @@ export interface Integration {
   missingVars: string[];
 }
 
+/**
+ * The rows the Connections panel shows.
+ *
+ * ONLY THINGS THAT ARE ACTUALLY CONNECTED, OR THAT SOMEBODY IS IN THE MIDDLE
+ * OF CONNECTING.
+ *
+ * Two rows used to sit here permanently saying nothing was set up, and both
+ * are now absent until there is something to say:
+ *
+ *   "Correos live push · Not set up" — push is not in use on purpose, the
+ *   receiver refuses every request while its credentials are unset, and the
+ *   two jobs that served it have been taken off the schedule. A row listing
+ *   two variables for a feature nobody is turning on is noise on the one
+ *   screen whose job is to show what works.
+ *
+ *   "WhatsApp — Step 1 · Connected" — there is no WhatsApp connection. The
+ *   system writes the messages and a person sends them from their own phone,
+ *   which is a workflow rather than an integration, and calling it Connected
+ *   made the opposite claim.
+ *
+ * Both come back the moment their credentials exist, which is exactly when
+ * their status becomes information.
+ */
 export async function integrationStatus(): Promise<Integration[]> {
   const { getSetting } = await import('@/lib/settings');
   const batchMode = await getSetting('correosBatchMode');
-  return [correosTrackpub(batchMode), correosPush(), await shopify(), whatsapp()];
+
+  const rows: (Integration | null)[] = [
+    correosTrackpub(batchMode),
+    correosPush(),
+    await shopify(),
+    email(),
+    whatsapp(),
+  ];
+
+  return rows.filter((r): r is Integration => r !== null);
 }
 
-function correosPush(): Integration {
+/** Null until somebody sets the push credentials. See the note above. */
+function correosPush(): Integration | null {
   const missing = ['CORREOS_PUSH_CLIENT_ID', 'CORREOS_PUSH_CLIENT_SECRET'].filter((v) => !envSet(v));
-
-  if (missing.length) {
-    return {
-      key: 'correos-push',
-      name: 'Correos live push',
-      status: 'missing',
-      detail: 'Not in use, on purpose: tracking runs on the three-hourly sweep above. '
-        + 'The receiver refuses every request while these are unset, and the two jobs that '
-        + 'serve push return immediately rather than reporting on something nobody switched '
-        + 'on. Set these to get updates the moment Correos scans a parcel instead of within '
-        + 'three hours.',
-      missingVars: missing,
-    };
-  }
+  if (missing.length) return null;
 
   const allowlisted = Boolean(process.env.CORREOS_PUSH_ALLOWED_IPS);
   return {
@@ -176,19 +196,48 @@ async function shopify(): Promise<Integration> {
   };
 }
 
-function whatsapp(): Integration {
-  const provider = envOr('WHATSAPP_PROVIDER', 'none').toLowerCase();
+/**
+ * Internal email: the return alerts and the daily digest.
+ *
+ * This row is here because of a failure that looks like success. With no SMTP
+ * host configured, `sendInternalAlert` logs to stdout and returns `logged`,
+ * and `logged` counts as delivered — deliberately, because a daily job that
+ * threw for want of a mail server would fail every day on every dev machine.
+ * The cost is that an alert nobody will ever read is stored as sent, and until
+ * now nothing on any screen said whether a single email had ever left.
+ */
+function email(): Integration {
+  const missing = ['SMTP_HOST', 'MAIL_TO'].filter((v) => !envSet(v));
 
-  if (provider === 'none' || provider === '') {
+  if (missing.length) {
     return {
-      key: 'whatsapp',
-      name: 'WhatsApp — Step 1',
-      status: 'ready',
-      detail: 'The system writes every message at the moment it is due and puts it in front '
-        + 'of you to send. Nothing goes out on its own, which is what Step 1 means.',
-      missingVars: [],
+      key: 'email',
+      name: 'Email',
+      status: 'missing',
+      detail: 'Alerts and the daily digest only go to the logs. They are still raised and '
+        + 'still recorded — the Today screen and the ticker show everything they would have '
+        + 'said — but nothing arrives in an inbox, so nobody finds out about a parcel coming '
+        + 'back unless they open the dashboard.',
+      missingVars: missing,
     };
   }
+
+  return {
+    key: 'email',
+    name: 'Email',
+    status: 'ready',
+    detail: `Alerts and the daily digest go to ${envOr('MAIL_TO', '')}.`,
+    missingVars: [],
+  };
+}
+
+/**
+ * Null while no provider is configured — which is the case today, and means
+ * the operator sends the messages themselves. See the note at the top.
+ */
+function whatsapp(): Integration | null {
+  const provider = envOr('WHATSAPP_PROVIDER', 'none').toLowerCase();
+  if (provider === 'none' || provider === '') return null;
 
   const missing = ['WHATSAPP_API_URL', 'WHATSAPP_API_TOKEN', 'WHATSAPP_PHONE_NUMBER_ID']
     .filter((v) => !envSet(v));
@@ -196,15 +245,15 @@ function whatsapp(): Integration {
   return missing.length
     ? {
         key: 'whatsapp',
-        name: 'WhatsApp — Step 2',
+        name: 'WhatsApp sending',
         status: 'missing',
         detail: `WHATSAPP_PROVIDER is set to "${provider}" but the credentials are not, so `
-          + 'messages fall back to being written for you rather than sent.',
+          + 'messages are still written for you to send rather than sent automatically.',
         missingVars: missing,
       }
     : {
         key: 'whatsapp',
-        name: 'WhatsApp — Step 2',
+        name: 'WhatsApp sending',
         status: 'ready',
         detail: 'Messages go out on their own, and you are only called in when nobody replies.',
         missingVars: [],

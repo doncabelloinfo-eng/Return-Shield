@@ -243,8 +243,12 @@ describe('missed delivery, waiting at the post office', () => {
       shippingCode: 'PM7',
       officeName: null,
       officeAddress: null,
-      officeHours: 'L–V 08:30–20:30 · S 09:30–13:00',
-      deadline: new Date('2026-10-20T21:59:59Z'),
+      // Correos named no office on these events, so there are no hours to
+      // quote and the message leaves the sentence out rather than inventing
+      // opening times nobody checked.
+      officeHours: null,
+      officeArrivedAt: row.atOffice ? new Date('2026-10-05T10:00:00Z') : null,
+      daysAtOffice: row.atOffice?.days ?? null,
       actionUrl: null,
     });
 

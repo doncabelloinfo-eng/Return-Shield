@@ -1,9 +1,8 @@
 import { cookies } from 'next/headers';
 import { requireUser } from '@/lib/auth/guard';
 import { loadDemoClock, isDemoMode } from '@/lib/demo-clock';
-import { getSettings } from '@/lib/settings';
 import { recentActivity } from '@/lib/activity';
-import { engineHealth } from '@/lib/engine-health';
+import { engineHealth, sweepStatus } from '@/lib/engine-health';
 import { actionable } from '@/lib/escalation/decide';
 import { loadRows } from '@/lib/views/rows';
 import { now } from '@/lib/clock';
@@ -26,11 +25,11 @@ export default async function PanelLayout({ children }: { children: React.ReactN
   // engineHealth() has to come after loadDemoClock(): in demo mode job_runs
   // rows are stamped from the offset clock, and reading one against the system
   // clock would make a working engine look stopped.
-  const [settings, ticker, rows, health] = await Promise.all([
-    getSettings(),
+  const [ticker, rows, health, sweep] = await Promise.all([
     recentActivity(24),
     loadRows(),
     engineHealth(),
+    sweepStatus(),
   ]);
 
   const at = now();
@@ -42,7 +41,6 @@ export default async function PanelLayout({ children }: { children: React.ReactN
       <div className="min-h-screen bg-ground text-ink">
         <TopBar
           dateLabel={`${f.day} ${f.date} · ${f.time}`}
-          phase={settings.phase}
           todoCount={todo}
           theme={cookies().get('rs_theme')?.value === 'dark' ? 'dark' : 'light'}
           demo={isDemoMode()}
@@ -56,12 +54,13 @@ export default async function PanelLayout({ children }: { children: React.ReactN
           sit on the right is gone, and the main content takes the full width —
           which the new Parcels table needs, eight columns of it.
 
-          The component files are kept, not deleted: WhatsApp is coming back in
-          Step 2, and the parcel page still has its own Copy message and
-          WhatsApp buttons, which is where that belongs anyway.
+          The component files are kept, not deleted: the panel comes back if
+          WhatsApp is ever connected, and the parcel page still has its own
+          Copy message and WhatsApp buttons, which is where that belongs
+          anyway.
         */}
         <div className="min-w-0">
-          <Tabs />
+          <Tabs lastChecked={sweep.ago} lastCheckedExact={sweep.exactWhen} />
           {children}
         </div>
       </div>

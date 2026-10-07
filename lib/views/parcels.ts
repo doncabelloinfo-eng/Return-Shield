@@ -2,15 +2,16 @@ import { sql as raw, type SQL } from 'drizzle-orm';
 import { getDb, rowsOf, at as ts } from '@/db';
 import { now } from '@/lib/clock';
 import {
-  daysLeft, exact, human, madridDaysBetween, madridMidnightUtc, workingDayCutoff,
-  workingDaysSince, shortDate,
+  daysAtOffice, exact, human, madridDaysBetween, madridMidnightUtc, workingDayCutoff,
+  workingDaysSince, shortDate, OFFICE_CRIT_DAYS,
 } from '@/lib/time';
 import { cutoffFor } from '@/lib/cleanup';
 import { stateLabels, eventLabels, type Bilingual } from '@/lib/carriers/correos/state-map';
 import { closeReasonLabel } from '@/lib/escalation/close-reasons';
 import { customerLabel, isMarketplace, realFirstName } from '@/lib/orders/customer-label';
+import { shopifyOrderLink } from '@/lib/orders/shopify-link';
 import {
-  emailLink, mapsLink, officeDetails, officeEmailSubject, whatsappLink, DEFAULT_OFFICE_HOURS,
+  emailLink, mapsLink, officeDetails, officeEmailSubject, whatsappLink,
 } from '@/lib/messaging/build-message';
 import { money } from '@/lib/escalation/decide';
 import { displayPhone } from '@/lib/import/phone';
@@ -212,8 +213,14 @@ export interface ParcelListRow {
   /** How long it has sat in this status, in words. */
   inStatus: string;
   daysInStatus: number;
-  deadline: string | null;
-  deadlineExact: string | null;
+  /**
+   * "At the office since 20 Sep · 8 days", or null when it is not at one.
+   *
+   * This replaced a "goes back on" date, which was worked out from a deposit
+   * window nobody had confirmed with Correos. Correos says when a parcel
+   * arrived, never when it will leave.
+   */
+  atOffice: { since: string; sinceExact: string; days: number; late: boolean } | null;
   paymentMethod: 'prepaid' | 'cod';
   valueText: string;
   phoneDisplay: string;
@@ -222,9 +229,7 @@ export interface ParcelListRow {
   town: string;
   /** How many times Correos tried and found nobody. */
   attempts: number;
-  /** Days left before the office sends it back, when there is a deadline. */
-  daysLeft: number | null;
-  /** The last day to collect, in words, and the full timestamp. */
+  /** The office Correos named, or null when they named none. */
   officeName: string | null;
   officeAddress: string | null;
   mapsHref: string;
@@ -235,6 +240,8 @@ export interface ParcelListRow {
   messageText: string;
   waHref: string;
   emailHref: string;
+  /** The order in the Shopify admin, or '' when there is no real link. */
+  shopifyHref: string;
   /**
    * The badges a row carries wherever it appears, not only in its own tab.
    * A parcel stuck in pre-admission is stuck whether you found it under
@@ -279,12 +286,13 @@ export interface ParcelsQuery {
 function base(): SQL {
   return raw`
     WITH b AS (
-      SELECT s.id, s.state, s.state_since, s.office_deadline, s.dropped_at,
+      SELECT s.id, s.state, s.state_since, s.dropped_at,
              s.close_reason, s.close_note, s.created_at AS shipment_created_at,
              s.shipping_code, s.office_arrived_at,
              o.order_number, o.customer_name, o.total_value_cents, o.payment_method,
              o.phone_e164, o.email, o.city, o.placed_at, o.created_at AS order_created_at,
              st.name AS store_name, st.platform AS store_platform,
+             st.shop_domain, o.external_order_id,
              of.name AS office_name, of.address AS office_address,
              of.opening_hours AS office_hours,
              COALESCE(pre.first_at, s.created_at) AS pre_ref,
@@ -454,14 +462,15 @@ export async function parcelsView(opts: ParcelsQuery = {}): Promise<ParcelsView>
 /**
  * Most urgent first, per tab.
  *
- * The post-office tab goes by deadline because that is the number that costs
- * money; the stuck tabs go oldest-first because the oldest is the worst; and
- * everything else goes by the last thing that happened, so the list reads as
- * "what moved recently".
+ * The post-office tabs go by LONGEST AT THE OFFICE — the earliest arrival
+ * first — which is what "most urgent" means now that nothing claims to know
+ * when a parcel goes back. The stuck tabs go oldest-first because the oldest
+ * is the worst; and everything else goes by the last thing that happened, so
+ * the list reads as "what moved recently".
  */
 function orderFor(tab: ParcelTabId): SQL {
-  if (tab === 'at_office') return raw`b.office_deadline ASC NULLS LAST, b.order_created_at ASC`;
-  if (tab === 'missed_delivery') return raw`b.office_deadline ASC NULLS LAST`;
+  if (tab === 'at_office') return raw`b.office_arrived_at ASC NULLS LAST, b.order_created_at ASC`;
+  if (tab === 'missed_delivery') return raw`b.office_arrived_at ASC NULLS LAST`;
   if (tab === 'stuck_pre_admission' || tab === 'stuck_same_status' || tab === 'stuck_30') {
     return raw`b.ship_ref ASC`;
   }
@@ -475,7 +484,6 @@ interface RawParcelRow {
   id: string;
   state: string;
   state_since: string | null;
-  office_deadline: string | null;
   office_arrived_at: string | null;
   dropped_at: string | null;
   close_reason: string | null;
@@ -493,6 +501,8 @@ interface RawParcelRow {
   order_created_at: string;
   store_name: string;
   store_platform: string;
+  shop_domain: string | null;
+  external_order_id: string;
   office_name: string | null;
   office_address: string | null;
   office_hours: string | null;
@@ -542,7 +552,8 @@ function toRow(
     badges.push(`${n} days, still not finished`);
   }
 
-  const deadline = r.office_deadline ? new Date(r.office_deadline) : null;
+  const arrivedAt = r.office_arrived_at ? new Date(r.office_arrived_at) : null;
+  const officeDays = r.state === 'at_office' ? daysAtOffice(arrivedAt, at) : null;
 
   /*
    * The same `officeDetails` text the parcel page copies, built here so the
@@ -559,8 +570,11 @@ function toRow(
     shippingCode: r.shipping_code,
     officeName: r.office_name,
     officeAddress: r.office_address,
-    officeHours: r.office_hours ?? DEFAULT_OFFICE_HOURS,
-    deadline,
+    // Correos' own hours or none at all. The hard-coded fallback this used to
+    // pass told customers opening times nobody had checked.
+    officeHours: r.office_hours,
+    officeArrivedAt: arrivedAt,
+    daysAtOffice: officeDays,
     actionUrl: null,
   });
 
@@ -591,8 +605,14 @@ function toRow(
       : null,
     inStatus: daysInStatus === 0 ? 'today' : `${daysInStatus} ${daysInStatus === 1 ? 'day' : 'days'}`,
     daysInStatus,
-    deadline: r.office_deadline ? human(new Date(r.office_deadline), at) : null,
-    deadlineExact: r.office_deadline ? exact(new Date(r.office_deadline)) : null,
+    atOffice: arrivedAt && officeDays !== null
+      ? {
+        since: shortDate(arrivedAt),
+        sinceExact: exact(arrivedAt),
+        days: officeDays,
+        late: officeDays >= OFFICE_CRIT_DAYS,
+      }
+      : null,
     paymentMethod: r.payment_method,
     valueText: money(r.total_value_cents),
     phoneDisplay: displayPhone(r.phone_e164),
@@ -600,7 +620,6 @@ function toRow(
     email: r.email,
     town: r.city ?? '',
     attempts: Number(r.failed_attempts ?? 0),
-    daysLeft: deadline ? daysLeft(deadline, at) : null,
     officeName: r.office_name,
     officeAddress: r.office_address,
     mapsHref: mapsLink(r.office_name, r.office_address),
@@ -609,6 +628,7 @@ function toRow(
     emailHref: r.email
       ? emailLink(r.email, officeEmailSubject(r.order_number), messageText)
       : '',
+    shopifyHref: shopifyOrderLink(r.store_platform, r.shop_domain, r.external_order_id) ?? '',
     badges,
     closed: r.dropped_at
       ? {

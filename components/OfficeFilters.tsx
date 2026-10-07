@@ -50,6 +50,13 @@ export function OfficeFilters({
           <button key={s} type="button" onClick={() => set('pay', s)} className={chip(current.pay === s)}>{s}</button>
         ))}
         <span className="mx-1 h-[22px] w-px bg-line" />
+        {/*
+          Days AT the office, which is why the longest bucket is last and the
+          list inside each one still runs longest-first. These used to be days
+          LEFT against a guessed last day, so "0–3" meant "about to go back"
+          and now means "only just arrived" — same buckets, opposite end.
+        */}
+        <span className="text-[11px] text-muted">Days at the office</span>
         {['All', '0–3', '4–7', '8+'].map((s) => (
           <button key={s} type="button" onClick={() => set('urg', s)} className={chip(current.urg === s)}>{s}</button>
         ))}

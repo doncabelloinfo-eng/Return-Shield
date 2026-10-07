@@ -111,21 +111,34 @@ describe('two escalation ticks at the same time', () => {
     expect(lastWarning).toHaveLength(1);
   });
 
-  it('raises one alert when the deadline runs out, not two', async () => {
+  it('raises one alert when Correos says it is coming back, not two', async () => {
     const f = await atOffice();
     clock.set('2026-10-17T10:00:00+02:00');
 
+    /*
+     * This used to be about the deposit window running out, which the engine
+     * worked out itself from a guessed fifteen days. That rung is gone: the
+     * return is Correos' to announce, and when they do, the alert comes from
+     * `notifyReturnStarted` instead. The concurrency question is the same —
+     * two ticks, one alert — so the test now asks it of the event that really
+     * raises one.
+     */
     await Promise.all([
+      ingestEvent({
+        shippingCode: f.shippingCode, eventCode: 'L03D320R',
+        eventDesc: 'Finalizado plazo retirada',
+        occurredAt: clock.now(), source: 'poll', rawPayload: {},
+      }),
       runShipment(f.shipmentId, clock.now()),
       runShipment(f.shipmentId, clock.now()),
     ]);
 
     const raised = await getDb().select().from(alerts).where(eq(alerts.shipmentId, f.shipmentId));
     expect(raised).toHaveLength(1);
-    expect(raised[0].subject).toContain('About to be returned');
+    expect(raised[0].subject).toContain('Coming back');
   });
 
-  it('runs the whole fifteen-day ladder twice over and still sends each message once', async () => {
+  it('runs the whole office ladder twice over and still sends each message once', async () => {
     const f = await atOffice();
     clock.set('2026-10-16T10:00:00+02:00');
 

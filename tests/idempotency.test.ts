@@ -203,7 +203,9 @@ describe('an event Correos has never sent before', () => {
 
     const [ship] = await getDb().select().from(shipments).where(eq(shipments.id, f.shipmentId));
     expect(ship.state).toBe('at_office');
-    expect(ship.officeDeadline).not.toBeNull();
+    // The arrival, which is a fact Correos sent. Not a last day, which is not.
+    expect(ship.officeArrivedAt).not.toBeNull();
+    expect(ship.officeDeadline).toBeNull();
   });
 });
 

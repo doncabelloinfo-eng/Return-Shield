@@ -41,7 +41,7 @@ export default async function CallsPage() {
         valueText: r.valueText,
         countdown: r.countdown,
         countdownTone: r.countdownTone,
-        daysLeftNumber: r.daysLeftNumber,
+        daysAtOffice: r.daysAtOffice,
         officeLine: [r.officeName, r.officeAddress].filter(Boolean).join(' · '),
         lastContactLine: r.lastContactLine,
       }))} />

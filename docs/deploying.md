@@ -156,7 +156,7 @@ deleting it would also stop its tracking — the reconcile sweep reads
 get their own tab (Parcels → **Stuck 30+ days**), a red badge wherever they
 appear, and a line in the daily digest.
 
-**Never deleted at all:** users, shops, settings, deposit windows, post
+**Never deleted at all:** users, shops, settings, product rules, post
 offices, postcode stats, and `closures` — the permanent record of every parcel
 written off by hand, which is the one table meant to outlive its parcel.
 
@@ -394,7 +394,7 @@ of sent — visible in the Vercel function logs, but nobody's inbox.
 | `DB_POOL_MAX` | 3 on Vercel, 10 elsewhere. Many short-lived instances against one database; a generous pool per instance is how Postgres runs out of connections at 9am. |
 | `AMAZON_ORDER_URL` | Optional, **no default**. A template with `{id}` in it, e.g. `https://sellercentral.amazon.es/orders-v3/order/{id}`. Turns the "Open in Amazon" button on Parcels → Missed delivery into a link; until it is set that button is "Copy order number" instead. Not guessed, because seller-central paths differ per region and account and a wrong one is a 404 at the worst moment. |
 | `TIKTOK_ORDER_URL` | The same for TikTok Shop, e.g. `https://seller-es.tiktok.com/order/detail?order_no={id}`. |
-| `RETENTION_DAYS` | 30. How many days of history the system keeps; the nightly job deletes the day that has just fallen off the end. **Never goes below 14** whatever you set — the escalation ladder runs over a fifteen-day deposit window, so a shorter retention would delete parcels still being chased. A value below the floor is clamped and the job detail says so; a value that is not a number falls back to 30. |
+| `RETENTION_DAYS` | 30. How many days of history the system keeps; the nightly job deletes the day that has just fallen off the end. **Never goes below 14** whatever you set — the office reminders run for thirteen days after a parcel reaches a counter, and a parcel can sit there longer, so a shorter retention would delete parcels still being chased. A value below the floor is clamped and the job detail says so; a value that is not a number falls back to 30. |
 | `SHOPIFY_API_VERSION` | `2026-10`, from `lib/carriers/shopify/api.ts`. A version Shopify has retired does not fail — it silently serves the oldest one still supported, so this is worth reviewing each year. Set it only to pin an older version on purpose. |
 | `RECONCILE_BATCH_SIZE` | 6000. How many parcels one sweep may consider. At ~5,000 live parcels this is "all of them". |
 | `RECONCILE_BUDGET_MS` | 240000. The sweep stops asking Correos anything new after this, which is 60 seconds inside the route's `maxDuration` of 300. |
@@ -431,8 +431,10 @@ database if any of them is missing:
 
 `db:seed` is safe to re-run. If the user already exists its password is left
 alone, and product rules are keyed by product code so they are neither
-duplicated nor reset over a deposit window somebody has since edited on the
-Settings screen.
+duplicated nor reset. Those rows are now only a list of the Correos services
+in use — the `deposit_days` column they also carry is no longer read by
+anything, because nothing in the system claims to know when a parcel goes
+back. See DECISIONS.md section 5.
 
 **This repository is public, so these logs are public.** Nothing in the
 workflow prints a password, a connection string or an email address, and
@@ -510,14 +512,14 @@ and leave everything else here. It has no dependency on any other route.
 3. Add `MIGRATE_DATABASE_URL` as a GitHub Actions secret (the same session
    pooler URL), plus `SEED_EMAIL`, `SEED_PASSWORD` and `SEED_NAME`.
 4. Run **Actions → Database migrate** with `seed` ticked. The migrations build
-   the schema; **the seed is what inserts `product_rules`**, and without it
-   every parcel has no deposit window and no office deadline, because the
-   deadline is `office arrival + product_rules.deposit_days` and there is
-   nothing to read the days from. The seed also creates the first user, so
-   there is somebody to log in as.
+   the schema and the seed creates the first user, so there is somebody to log
+   in as. (This step used to be load-bearing for a second reason: the seed
+   inserted `product_rules`, and without them no parcel had a deposit window
+   or an office deadline. Neither exists any more — nothing invents a return
+   date — so the seed is now only about the user.)
 5. Deploy.
-6. Sign in. The Settings screen will say nothing is connected, and the deposit
-   windows from step 4 will be there to check. That is correct.
+6. Sign in. The Settings screen will say nothing is connected. That is
+   correct.
 7. Add the Correos credentials as they arrive — all four — and press **Test
    Correos connection**. Then add each Shopify store by the procedure in
    [Adding a Shopify store](#adding-a-shopify-store), and watch the Connections

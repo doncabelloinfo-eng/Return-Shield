@@ -331,15 +331,21 @@ describe('batch coverage keyed on `code`', () => {
 
 /* ========================================================================== */
 
-describe('the three confirmed event codes', () => {
-  it('are the ones seen in real traffic', () => {
-    expect(knownCodes().sort()).toEqual(['A010000V', 'A090000V', 'P040000V']);
+describe('the confirmed event codes', () => {
+  it('are the ones seen in real traffic, and only those', () => {
+    // Nothing is added here on a hunch. A guessed code maps silently and
+    // wrongly, where a missing one falls through to the wording and asks a
+    // human. The two added on 7 October came out of the thirty-day pull's
+    // stored payloads. See tests/wordings.test.ts for the wordings.
+    expect(knownCodes().sort())
+      .toEqual(['A010000V', 'A090000V', 'H01I350V', 'L03D320R', 'P040000V']);
   });
 
   it.each([
     ['A090000V', 'Prerregistrado', 'created'],
     ['A010000V', 'Admitido.', 'accepted'],
     ['P040000V', 'Clasificado', 'in_transit'],
+    ['H01I350V', 'A disposición del destinatario', 'at_office'],
   ])('%s (%s) → %s', (code, desc, state) => {
     const match = matchCorreosEvent(code, desc, 'EN CAMINO');
     expect(match).toEqual({ state, via: 'code' });

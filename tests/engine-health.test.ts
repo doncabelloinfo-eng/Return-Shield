@@ -82,7 +82,7 @@ describe('engineHealth', () => {
   it('counts a skipped run as a heartbeat', async () => {
     // push-heartbeat declining to alert still proves Vercel fired the route,
     // the secret matched and the database was writable.
-    await record('push-heartbeat', ago(5 * MINUTE), { ok: true, skipped: true });
+    await record('import-reminder', ago(5 * MINUTE), { ok: true, skipped: true });
     expect((await engineHealth()).state).toBe('healthy');
   });
 
@@ -144,9 +144,12 @@ describe('jobHealth', () => {
   });
 
   it('leaves the real run null for a job that has only ever skipped', async () => {
-    await record('push-drain', ago(2 * MINUTE), { ok: true, skipped: true });
+    // `import-reminder` is hourly and does its work once a day, so most of its
+    // runs are skips — which is what this is about. It used to be `push-drain`,
+    // which is no longer on the schedule and so no longer on this screen.
+    await record('import-reminder', ago(2 * MINUTE), { ok: true, skipped: true });
 
-    const row = (await jobHealth()).find((r) => r.job === 'push-drain')!;
+    const row = (await jobHealth()).find((r) => r.job === 'import-reminder')!;
     expect(row.lastHeartbeatAgo).toBe('2 minutes ago');
     expect(row.lastRealRunAt).toBeNull();
   });

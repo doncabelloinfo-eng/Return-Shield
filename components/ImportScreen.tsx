@@ -4,6 +4,7 @@ import { useRouter } from 'next/navigation';
 import { useRef, useState, useTransition } from 'react';
 import type { PreviewRow } from '@/lib/import/parse';
 import { confirmUpload, previewUpload, type PreviewResult } from '@/app/actions/import';
+import { sweepNewParcels } from '@/app/actions/refresh';
 import { isAcceptableFix } from '@/lib/import/phone';
 import { useToast } from './Toast';
 import { Chip, Th } from './ui';
@@ -20,6 +21,8 @@ export function ImportScreen() {
   const [result, setResult] = useState<PreviewResult | null>(null);
   const [fixes, setFixes] = useState<Record<number, string>>({});
   const [pending, start] = useTransition();
+  /** The Correos check that follows a confirmed upload. See the button below. */
+  const [checking, setChecking] = useState(false);
   const input = useRef<HTMLInputElement>(null);
   const router = useRouter();
   const toast = useToast();
@@ -186,17 +189,43 @@ export function ImportScreen() {
             </button>
             <button
               type="button"
-              disabled={pending}
+              disabled={pending || checking}
               onClick={() => start(async () => {
                 const r = await confirmUpload(result.filename!, rows, fixes);
-                toast({ text: `${r.created} orders added. ${r.fixed} phone numbers fixed automatically.` });
                 setResult(null);
                 setFixes({});
+                toast({ text: `${r.created} orders added. ${r.fixed} phone numbers fixed automatically.` });
+
+                /*
+                 * Then ask Correos about them, the same way the Shopify
+                 * history pull does — a second request, because both are
+                 * bounded by the same function limit.
+                 *
+                 * Without this the new parcels sit in Pre-admission until the
+                 * next scheduled sweep, up to three hours later. The eighty-one
+                 * TikTok parcels uploaded on 7 October did exactly that, and
+                 * any of them already waiting at a post office spent those
+                 * hours invisible.
+                 */
+                if (r.created > 0) {
+                  setChecking(true);
+                  try {
+                    const swept = await sweepNewParcels();
+                    toast({
+                      text: swept.ok
+                        ? `${Number(swept.detail?.asked ?? 0)} asked of Correos, so the new parcels show their real status.`
+                        : `${swept.error} They are in — the three-hourly sweep will pick them up.`,
+                    });
+                  } finally {
+                    setChecking(false);
+                  }
+                }
+
                 router.refresh();
               })}
               className="rounded bg-navy px-[17px] py-[10px] text-[12.5px] font-semibold text-white disabled:opacity-60"
             >
-              {pending ? 'Adding…' : `Add ${s.new} orders`}
+              {checking ? 'Asking Correos…' : pending ? 'Adding…' : `Add ${s.new} orders`}
             </button>
           </div>
         </div>

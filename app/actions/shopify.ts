@@ -6,7 +6,6 @@ import { getDb } from '@/db';
 import { stores } from '@/db/schema';
 import { requireUser } from '@/lib/auth/guard';
 import { pullStore, type PullReport } from '@/lib/carriers/shopify/pull';
-import { reconcile } from '@/jobs/definitions';
 
 /**
  * "Pull the last 30 days", per Shopify store.
@@ -47,28 +46,12 @@ export async function pullShopifyHistory(storeKey: string): Promise<PullResult> 
   }
 }
 
-export interface SweepResult {
-  ok: boolean;
-  error?: string;
-  /** Parcels asked about, and how many had a past rather than news. */
-  detail?: Record<string, unknown>;
-}
-
-/**
- * Ask Correos about everything the pull just created.
- *
- * `onlyUnswept`, so this is the new parcels and nothing else: the full sweep
- * runs every three hours anyway, and re-asking about five thousand parcels
- * here would spend the budget on the ones that are already up to date.
+/*
+ * The second step — asking Correos about the parcels the pull just created —
+ * now lives in app/actions/refresh.ts as `sweepNewParcels`, because the
+ * confirmed upload of a TikTok or Amazon file needs exactly the same thing and
+ * two copies of it would drift. It takes the same `job_locks` row as the
+ * Refresh button and the cron, so none of the three can overlap.
  */
-export async function sweepPulledParcels(): Promise<SweepResult> {
-  await requireUser();
-
-  try {
-    const result = await reconcile({ onlyUnswept: true, budgetMs: 240_000 });
-    revalidatePath('/', 'layout');
-    return { ok: true, detail: result.detail as Record<string, unknown> };
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : 'The sweep did not finish.' };
-  }
-}
+// (not re-exported from here: a "use server" file may only export async
+// functions, so the one import site reaches for it directly.)

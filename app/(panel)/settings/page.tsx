@@ -1,8 +1,7 @@
-import { sql as raw, and, eq, desc, isNull } from 'drizzle-orm';
+import { and, eq, desc, isNull } from 'drizzle-orm';
 import { getDb } from '@/db';
-import { eventReviewQueue, postcodeStats, productRules, shipments, stores } from '@/db/schema';
+import { eventReviewQueue, postcodeStats, stores } from '@/db/schema';
 import { ShopifyPull } from '@/components/ShopifyPull';
-import { DepositRow } from '@/components/DepositRow';
 import { IntegrationsPanel } from '@/components/IntegrationsPanel';
 import { JobRunsPanel } from '@/components/JobRunsPanel';
 import { integrationStatus } from '@/lib/integrations';
@@ -20,17 +19,18 @@ import { eventLabels } from '@/lib/carriers/correos/state-map';
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 /**
- * The one number everything hangs off.
+ * What is connected, what is running, and what Correos has said that nobody
+ * here understands yet.
  *
- * Correos keeps a parcel for a set number of days, then sends it back. Every
- * deadline, countdown and reminder hangs off this. Change it and the post
- * office list re-sorts straight away.
+ * It used to open with "how long the post office waits": a per-service number
+ * an operator could nudge up and down, which every deadline and countdown in
+ * the system hung off. That section is gone with the guess it fed. Correos
+ * does not tell anybody how long they hold a parcel, and they do say when they
+ * send one back — so nothing here needs to be configured for a parcel to be
+ * chased correctly.
  */
 export default async function SettingsPage() {
-  const [rules, counts, watched, review, integrations, jobs, batchMode, bytes, shopifyStores] = await Promise.all([
-    getDb().select().from(productRules).orderBy(productRules.productCode),
-    getDb().select({ code: shipments.productCode, n: raw<number>`count(*)::int` })
-      .from(shipments).groupBy(shipments.productCode),
+  const [watched, review, integrations, jobs, batchMode, bytes, shopifyStores] = await Promise.all([
     getDb().select().from(postcodeStats).where(eq(postcodeStats.watch, true)).orderBy(desc(postcodeStats.failRate)),
     getDb().select().from(eventReviewQueue)
       .where(isNull(eventReviewQueue.resolvedAt))
@@ -46,54 +46,14 @@ export default async function SettingsPage() {
 
   const windowDays = retentionDays();
 
-  const countFor = (code: string) => counts.find((c) => c.code === code)?.n ?? 0;
-  const anyUnconfirmed = rules.some((r) => !r.confirmedWithCarrier);
-
   return (
     <div className="max-w-[860px] px-4 pb-10 pt-[18px]">
       <PageHeading
-        title="Settings — how long the post office waits"
-        note="Correos keeps a parcel for a set number of days, then sends it back. Every deadline, countdown and reminder hangs off this one number. Change it and watch the post office list re-sort."
+        title="Settings"
+        note="What is connected, what is running, and what Correos has said that we do not recognise yet."
       />
 
-      {anyUnconfirmed && (
-        <div
-          className="mt-4 rounded-[5px] border border-line border-l-4 border-l-warn px-[15px] py-[13px] text-[12.5px] leading-[1.55] text-ink"
-          style={{ background: 'var(--warnsoft)' }}
-        >
-          <strong>These numbers are still a guess.</strong> Nobody has confirmed the deposit window
-          with Correos yet, and the real figure may differ by service. Until somebody does, every
-          countdown on every screen is an estimate — tick a service off below once it has been
-          confirmed.
-        </div>
-      )}
-
-      <div className="mt-[18px] overflow-hidden rounded-[5px] border border-line bg-surface">
-        {rules.length === 0 && (
-          <div className="px-4 py-[14px] text-[12.5px] text-muted">
-            No services yet. They appear here the first time a parcel is shipped on one.
-          </div>
-        )}
-        {rules.map((r) => (
-          <DepositRow
-            key={r.productCode}
-            productCode={r.productCode}
-            days={r.depositDays}
-            confirmed={r.confirmedWithCarrier}
-            count={countFor(r.productCode)}
-          />
-        ))}
-      </div>
-
-      <div
-        className="mt-[14px] rounded-[5px] border border-line border-l-4 border-l-warn px-[15px] py-[13px] text-[12.5px] leading-[1.55] text-ink"
-        style={{ background: 'var(--warnsoft)' }}
-      >
-        Cutting the days can put a parcel past its last day straight away — exactly what happens
-        in real life when Correos changes how long they hold things.
-      </div>
-
-      <div className="mt-[22px]">
+      <div className="mt-[18px]">
         <IntegrationsPanel integrations={integrations} batchMode={batchMode} />
       </div>
 

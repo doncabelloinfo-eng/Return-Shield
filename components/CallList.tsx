@@ -23,7 +23,8 @@ export interface CallCard {
   valueText: string;
   countdown: string;
   countdownTone: Tone;
-  daysLeftNumber: number | null;
+  /** Days at the post office. Null when the parcel is not at one. */
+  daysAtOffice: number | null;
   officeLine: string;
   lastContactLine: string;
 }
@@ -107,8 +108,10 @@ export function CallList({ rows }: { rows: CallCard[] }) {
             <div className="flex flex-wrap items-center gap-[18px]">
               <div className="flex-none basis-[74px] text-center">
                 <HeroNumber value={r.countdown} tone={r.countdownTone} size={44} />
+                {/* Days AT the office, counting up. Nothing tells us how long
+                    is left, so nothing here claims to. */}
                 <div className="text-[9px] font-semibold uppercase tracking-[.09em] text-muted">
-                  {r.daysLeftNumber === 1 ? 'day left' : 'days left'}
+                  {r.daysAtOffice === null ? '' : r.daysAtOffice === 1 ? 'day there' : 'days there'}
                 </div>
               </div>
               <div className="w-px self-stretch bg-line" />

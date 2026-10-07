@@ -69,20 +69,35 @@ function dayTuple(at: Date): [number, number, number] {
 }
 
 /**
- * The instant a deposit window runs out: `days` calendar days after arrival,
- * at the end of that day in Madrid. Correos does not send a parcel back at
- * 13:47 because that is when it arrived a fortnight ago — it goes back at the
- * end of its last day. Treating the deadline as an instant would have us
- * warning a customer a day early and marking a live parcel as lost.
+ * How long a parcel has been sitting at the post office, in Madrid calendar
+ * days. The day it arrived is 0.
+ *
+ * This replaced a guessed last day. Correos does not tell us when they will
+ * send a parcel back — their at-the-office event carries no date beyond its
+ * own — so the system used a per-service "how long the post office waits"
+ * number, 15 days, that nobody had ever confirmed, and every countdown,
+ * deadline and "goes back on" date on every screen was built on it. The honest
+ * answer is the one fact Correos did give us: the day it got there.
+ *
+ * Counted in calendar days rather than in 86,400,000ms steps because one of
+ * those "days" is 23 or 25 hours long twice a year, and a number on a screen
+ * must not step by two on the morning the clocks change.
  */
-export function deadlineFrom(arrivedAt: Date, depositDays: number): Date {
-  const p = madridParts(arrivedAt);
-  // Add the days to the calendar day itself, not to the instant. Adding
-  // 15 x 86,400,000ms across the October clock change lands an hour short and
-  // reads as the day before — a parcel written off with a day still on it.
-  // Date.UTC normalises the overflow, so day 35 of October is 4 November.
-  return endOfMadridDay(p.year, p.month, p.day + depositDays);
+export function daysAtOffice(arrivedAt: Date | null | undefined, from: Date = now()): number | null {
+  if (!arrivedAt) return null;
+  return Math.max(0, madridDaysBetween(arrivedAt, from));
 }
+
+/**
+ * When a parcel at the office starts to look bad.
+ *
+ * `OFFICE_WARN_DAYS` is the day the "we can send it somewhere else" reminder
+ * goes out, and `OFFICE_CRIT_DAYS` the day of the fourth reminder — so the
+ * colour on the screen changes on the same day the customer hears from us
+ * again, rather than on a number of its own.
+ */
+export const OFFICE_WARN_DAYS = 7;
+export const OFFICE_CRIT_DAYS = 11;
 
 /** The UTC instant of 00:00 on a given Madrid calendar day. */
 export function madridMidnightUtc(year: number, month: number, day: number): Date {
@@ -96,12 +111,6 @@ export function madridMidnightUtc(year: number, month: number, day: number): Dat
   }
   // The hour 00:00 does not exist on a spring-forward day; take 01:00 instead.
   return new Date(Date.UTC(year, month - 1, day, -1, 0, 0, 0));
-}
-
-/** The last instant of a Madrid calendar day (23:59:59.999 local). */
-export function endOfMadridDay(year: number, month: number, day: number): Date {
-  const nextMidnight = madridMidnightUtc(year, month, day + 1);
-  return new Date(nextMidnight.getTime() - 1);
 }
 
 /** The instant of hh:mm on a Madrid calendar day. Used to schedule jobs. */
@@ -165,19 +174,10 @@ export function human(at: Date, from: Date = now()): string {
 }
 
 /**
- * Days left before the post office sends it back. Counted in calendar days:
- * a deadline at the end of today is 0 days left, not "0.4".
- */
-export function daysLeft(deadline: Date | null | undefined, from: Date = now()): number | null {
-  if (!deadline) return null;
-  return madridDaysBetween(from, deadline);
-}
-
-/**
  * "4 minutes ago", "2 hours ago", "3 days ago".
  *
  * `human()` above answers a different question: it counts whole Madrid
- * calendar days, which is right for a deadline ("goes back this Thursday") and
+ * calendar days, which is right for a date ("this Thursday") and
  * useless for an outage — a 47-minute silence and a 47-second one both come
  * back as "today". This one is for durations.
  */

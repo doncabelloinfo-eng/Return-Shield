@@ -15,7 +15,12 @@ import { env } from '@/lib/env';
  * number" instead — which still works, it just takes one more paste.
  *
  *   AMAZON_ORDER_URL=https://sellercentral.amazon.es/orders-v3/order/{id}
- *   TIKTOK_ORDER_URL=https://seller-es.tiktok.com/order/detail?order_no={id}
+ *   TIKTOK_ORDER_URL=https://seller-es.tiktok.com/order/detail?order_no={id}&shop_region=ES
+ *
+ * Those are the two that are actually configured. TikTok's needs the
+ * `&shop_region=ES` — without it the page loads against whichever region the
+ * seller account last used, which for a multi-region account is not Spain and
+ * not this order.
  *
  * `{id}` is replaced with the order number, URL-encoded.
  */

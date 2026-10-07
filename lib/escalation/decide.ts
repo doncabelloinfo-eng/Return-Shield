@@ -1,6 +1,6 @@
 import type { ShipmentState } from '@/lib/state-machine/states';
 import { RETURN_STATES } from '@/lib/state-machine/states';
-import { daysLeft } from '@/lib/time';
+import { daysAtOffice, OFFICE_CRIT_DAYS, OFFICE_WARN_DAYS } from '@/lib/time';
 import { now } from '@/lib/clock';
 
 /**
@@ -25,7 +25,15 @@ export interface OpenTask {
 export interface DecidableShipment {
   id: string;
   state: ShipmentState;
-  officeDeadline: Date | null;
+  /**
+   * When Correos said it reached the counter.
+   *
+   * This used to be `officeDeadline`, a last day worked out from a deposit
+   * window nobody had confirmed. Everything that read it — the ordering, the
+   * colour of a row, the line under it — now reads the one date Correos
+   * actually sends, and counts forward instead of down.
+   */
+  officeArrivedAt: Date | null;
   officeName: string | null;
   town: string;
   customerName: string;
@@ -56,20 +64,25 @@ export function riskCents(s: Pick<DecidableShipment, 'valueCents' | 'paymentMeth
 /**
  * The ordering score. Higher goes first.
  *
- * Days left bend the money, they do not replace it: a parcel with two days
- * left doubles, one out of time triples. A parcel already coming back is worth
- * half — the money is lost either way, what is left is getting the stock back.
+ * Time at the office bends the money, it does not replace it: the longest-
+ * waiting parcel outranks a slightly richer one that landed this morning. The
+ * two multipliers are the days the last two reminders go out — at eleven days
+ * the system has already written to the customer four times, at thirteen it is
+ * the final one plus a call, and by then the parcel is the one to save.
+ *
+ * A parcel already coming back is worth half: the money is lost either way,
+ * and what is left is getting the stock back.
  */
 export function priority(s: DecidableShipment, at: Date = now()): number {
   const risk = riskCents(s);
   if (RETURN_STATES.has(s.state)) return risk * 0.5;
 
-  const d = daysLeft(s.officeDeadline, at);
-  if (d === null) return risk * 0.7;
+  const days = daysAtOffice(s.officeArrivedAt, at);
+  if (days === null) return risk * 0.7;
 
-  let score = risk * (0.4 + Math.max(0, 16 - d) / 16);
-  if (d <= 2) score *= 2;
-  if (d <= 0) score *= 3;
+  let score = risk * (0.4 + Math.min(16, days + 1) / 16);
+  if (days >= OFFICE_CRIT_DAYS) score *= 2;
+  if (days >= 13) score *= 3;
   return score;
 }
 
@@ -86,9 +99,11 @@ export function firstName(fullName: string): string {
  * somebody work out the ordering themselves.
  */
 export function reason(s: DecidableShipment, at: Date = now()): string {
-  const d = daysLeft(s.officeDeadline, at);
+  const days = daysAtOffice(s.officeArrivedAt, at);
   const bits: string[] = [];
-  if (d !== null && d <= 2) bits.push(d <= 0 ? 'out of time' : `${d} days left`);
+  if (days !== null && days >= OFFICE_CRIT_DAYS) {
+    bits.push(`${days} ${days === 1 ? 'day' : 'days'} at the post office`);
+  }
   bits.push(s.paymentMethod === 'cod'
     ? `${money(s.valueCents)}, cash on delivery`
     : `${money(s.valueCents)} prepaid`);
@@ -125,9 +140,15 @@ export function nextAction(s: DecidableShipment, at: Date = now()): NextAction |
   // It is physically coming back. The only useful thing left is the stock.
   if (RETURN_STATES.has(s.state) && !s.restocked) {
     return {
-      label: 'Put back in stock',
+      /*
+       * "Mark as", not "Put": all this does is record the restock here.
+       * Shopify's inventory does not move, because the access token is
+       * `read_orders` only — so a button that said "Put back in stock" was
+       * promising something nobody had wired up.
+       */
+      label: 'Mark as back in stock',
       why: s.state === 'returning'
-        ? `Time ran out at ${s.officeName ?? 'the post office'}`
+        ? `Correos is sending it back from ${s.officeName ?? 'the post office'}`
         : "Customer didn't want it",
       kind: 'restock',
       tone: 'navy',
@@ -135,25 +156,40 @@ export function nextAction(s: DecidableShipment, at: Date = now()): NextAction |
     };
   }
 
-  // Correos charges for a redirection, so this one always asks twice.
+  /*
+   * "Mark as sent", not "Send": nothing here talks to Correos.
+   *
+   * A redirection is arranged by a person, through Mi Oficina or on the
+   * phone, and Correos charges for it. This button records that it has been
+   * done, closes the task and takes the parcel off the list — which is real
+   * and useful, and is not the same thing as the label "Send new address to
+   * Correos" was claiming. It still asks twice, because closing that task is
+   * not undoable, but the confirmation no longer pretends money is about to
+   * be spent by the press itself.
+   */
   if (s.redirectPending) {
     return {
-      label: 'Send new address to Correos',
-      why: 'They asked for a different address',
+      label: 'Mark new address as sent',
+      why: 'They asked for a different address — Correos charges for a redirection',
       kind: 'send_redirect',
       tone: 'confirm',
       needsConfirm: true,
     };
   }
 
+  // Same again: these record that a person asked Correos. Nothing in this
+  // system can open a case with them.
+
   const chase = task('chase_carrier');
   if (chase) {
-    return { label: 'Ask Correos about this one', why: chase.label, kind: 'chase_carrier', tone: 'navy', needsConfirm: false };
+    return { label: 'Mark as asked Correos', why: chase.label, kind: 'chase_carrier', tone: 'navy', needsConfirm: false };
   }
 
   const fix = task('address_fix');
   if (fix) {
-    const label = fix.reason === 'address_confirmed' ? 'Book another delivery' : 'Fix address with Correos';
+    const label = fix.reason === 'address_confirmed'
+      ? 'Mark new delivery as booked'
+      : 'Mark address as fixed with Correos';
     return { label, why: fix.label, kind: 'rebook_delivery', tone: 'navy', needsConfirm: false };
   }
 
@@ -162,6 +198,7 @@ export function nextAction(s: DecidableShipment, at: Date = now()): NextAction |
   const insight = task('insight');
   if (insight) {
     return {
+      // An instruction to a person, which is honest: they ring the customer.
       label: 'Confirm the address now',
       why: `${s.town.split(',')[0]} fails far more than average`,
       kind: 'confirm_address',
@@ -172,8 +209,10 @@ export function nextAction(s: DecidableShipment, at: Date = now()): NextAction |
 
   if (has('call') || has('contact')) {
     const base = task('call')?.label ?? task('contact')?.label ?? '';
-    const d = daysLeft(s.officeDeadline, at);
-    const suffix = d !== null ? ` · ${d} ${d === 1 ? 'day left' : 'days left'}` : '';
+    const days = daysAtOffice(s.officeArrivedAt, at);
+    const suffix = days !== null
+      ? ` · ${days} ${days === 1 ? 'day' : 'days'} at the post office`
+      : '';
     return {
       label: `Call ${firstName(s.customerName)}`,
       why: base + suffix,
@@ -210,12 +249,18 @@ export function callQueue<T extends DecidableShipment>(list: readonly T[], at: D
 
 export type Tone = 'calm' | 'warn' | 'crit' | 'ret';
 
-/** How loud a row should be. Drives colour, weight and the left stripe. */
-export function tone(state: ShipmentState, deadline: Date | null, at: Date = now()): Tone {
+/**
+ * How loud a row should be. Drives colour, weight and the left stripe.
+ *
+ * Red from eleven days at the office, amber from seven — the two days the
+ * system writes to the customer again, so the screen goes louder on the same
+ * day the parcel does.
+ */
+export function tone(state: ShipmentState, officeArrivedAt: Date | null, at: Date = now()): Tone {
   if (state === 'returning' || state === 'refused' || state === 'returned') return 'ret';
-  const d = daysLeft(deadline, at);
-  if (d === null) return 'calm';
-  if (d <= 3) return 'crit';
-  if (d <= 7) return 'warn';
+  const days = daysAtOffice(officeArrivedAt, at);
+  if (days === null) return 'calm';
+  if (days >= OFFICE_CRIT_DAYS) return 'crit';
+  if (days >= OFFICE_WARN_DAYS) return 'warn';
   return 'calm';
 }

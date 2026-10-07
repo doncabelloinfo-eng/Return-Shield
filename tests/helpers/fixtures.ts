@@ -26,6 +26,10 @@ export interface MakeShipmentOptions {
   /** A separate shop, for testing the shop filter. */
   storeKey?: string;
   orderNumber?: string;
+  /** The shop's myshopify host. Needed by the "Open in Shopify" link. */
+  shopDomain?: string | null;
+  /** Shopify's numeric order id. The default is deliberately not numeric. */
+  externalOrderId?: string;
 }
 
 export interface Fixture {
@@ -56,14 +60,18 @@ export async function makeShipment(opts: MakeShipmentOptions = {}): Promise<Fixt
     name: opts.storeName ?? 'Cosmetics Afro Latino',
     platform: 'shopify',
     ingest: 'auto',
+    ...(opts.shopDomain !== undefined ? { shopDomain: opts.shopDomain } : {}),
   }).onConflictDoUpdate({
     target: stores.key,
-    set: { name: opts.storeName ?? 'Cosmetics Afro Latino' },
+    set: {
+      name: opts.storeName ?? 'Cosmetics Afro Latino',
+      ...(opts.shopDomain !== undefined ? { shopDomain: opts.shopDomain } : {}),
+    },
   }).returning({ id: stores.id });
 
   const [order] = await getDb().insert(orders).values({
     storeId: store.id,
-    externalOrderId: `ext-${shippingCode}`,
+    externalOrderId: opts.externalOrderId ?? `ext-${shippingCode}`,
     orderNumber: opts.orderNumber ?? `ORD-${shippingCode.slice(-4)}`,
     customerName: opts.customerName ?? 'Lucía Fernández Ortiz',
     phoneE164: opts.phone === null ? null : (opts.phone ?? '+34627481093'),

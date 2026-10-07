@@ -373,8 +373,8 @@ export const notifications = pgTable('notifications', {
   body: text('body').notNull(),
   linkLabel: text('link_label'),
   channel: text('channel').notNull().default('whatsapp'),
-  // queued  — written, waiting for the operator to send it (Step 1)
-  // sent    — handed to the provider (Step 2)
+  // queued  — written, waiting for the operator to send it
+  // sent    — handed to a provider that can send
   // failed  — the provider rejected it
   status: text('status').notNull().default('queued')
     .$type<'queued' | 'sent' | 'failed' | 'copied'>(),

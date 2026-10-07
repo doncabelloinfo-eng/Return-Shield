@@ -95,6 +95,32 @@ const DESCRIPTION_ALIASES: Record<string, string> = {
   'a disposicion del destinatario': 'disponible en oficina para recoger',
   'envio entregado en buzon domiciliario': 'entregado',
   'retorno a remitente': 'devolucion a origen iniciada',
+
+  /*
+   * Wordings from the 7 October traffic, with the codes they arrived under
+   * recorded in `BY_CODE` below.
+   *
+   *   "Intento de entrega. Ausente" is a failed delivery. The key keeps the
+   *   full stop in the middle of it, because `normaliseDesc` strips trailing
+   *   punctuation only — "intento de entrega. ausente" is what the normaliser
+   *   actually produces, and a key spelled without the stop would never
+   *   match. Until this was here the event fell through to its phase, EN
+   *   ENTREGA, so the parcel read as out for delivery, the Failed delivery tab
+   *   never saw it and the post-failure ladder never started.
+   *
+   *   "Finalizado plazo retirada" is Correos saying the collection window is
+   *   over and the parcel is going back. Before this the parcel stayed
+   *   "Waiting at the post office" and sat in the Missed-delivery worklist, so
+   *   the operator would ring a customer about collecting a parcel that can no
+   *   longer be collected.
+   *
+   * Two more wordings arrived with them and are NOT here, on purpose:
+   * "Desestacionado" and "Entrega modificada". Neither meaning is clear from
+   * the words alone, so they stay in the review queue until Correos tell us.
+   */
+  'intento de entrega. ausente': 'intento de entrega fallido - ausente',
+  'finalizado plazo retirada': 'devolucion a origen iniciada',
+  'devolucion del envio por finalizacion de plazo de retirada': 'devolucion a origen iniciada',
 };
 
 /**
@@ -108,6 +134,26 @@ const BY_CODE: Record<string, ShipmentState> = {
   A090000V: 'created',          // "Prerregistrado"
   A010000V: 'accepted',         // "Admitido."
   P040000V: 'in_transit',       // "Clasificado"
+
+  // Captured 7 October from the thirty-day pull.
+  //
+  // `H01I350V` is the event the whole post-office part of the system hangs
+  // off: "A disposición del destinatario", the moment the parcel is actually
+  // collectable. Its wording was already mapped; the code is here because the
+  // code is the stable key and the wording is not.
+  H01I350V: 'at_office',        // "A disposición del destinatario" · EN ENTREGA
+  // And this is Correos saying it is going back, which is the only thing that
+  // ever said so. Nothing else in the system claims to know when a parcel is
+  // returned to us.
+  L03D320R: 'returning',        // "Finalizado plazo retirada" · DEVOLUCION
+
+  // "Intento de entrega. Ausente" is mapped by its wording above and has no
+  // entry here: the payload we have for it was summarised rather than stored
+  // in full, so its code is not confirmed, and a guessed code is worse than a
+  // missing one — it maps silently and wrongly, where a missing one simply
+  // falls through to the wording that is confirmed. `remapKnownEvents` records
+  // the real code against the review-queue row it resolves, so the next round
+  // can read it off the Settings screen rather than guess it either.
 };
 
 /**
@@ -131,6 +177,16 @@ const BY_PHASE: Record<string, ShipmentState> = {
   'en camino': 'in_transit',
   'en entrega': 'out_for_delivery',
   entregado: 'delivered',
+  /*
+   * Correos marks every return event with this phase, so an unmapped return
+   * wording still reaches "Coming back" rather than leaving the parcel sitting
+   * in a post-office worklist nobody can act on.
+   *
+   * It is still the weakest signal and still never overrules a code or a
+   * wording we know: `matchCorreosEvent` only looks here when both of those
+   * came back empty, and a phase match goes to the review queue all the same.
+   */
+  devolucion: 'returning',
 };
 
 /**

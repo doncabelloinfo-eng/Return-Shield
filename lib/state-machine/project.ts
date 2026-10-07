@@ -1,6 +1,5 @@
 import type { ShipmentState } from './states';
 import { applyEvent } from './transitions';
-import { deadlineFrom } from '@/lib/time';
 import { HOUR } from '@/lib/clock';
 
 /**
@@ -32,7 +31,6 @@ export interface Projection {
   officeArrivedAt: Date | null;
   officeCode: string | null;
   officeName: string | null;
-  officeDeadline: Date | null;
   /** The most recent failed delivery. The first four rungs hang off this. */
   failedAt: Date | null;
   /** Newest event of any kind, mapped or not. Silence is measured from here. */
@@ -51,11 +49,6 @@ export interface Projection {
   unmappedCount: number;
 }
 
-export interface ProjectOptions {
-  /** From product_rules. Never defaulted to 15 by accident — see callers. */
-  depositDays: number;
-}
-
 /**
  * Sorting is by `occurredAt`, with the event code as a tiebreak so two events
  * stamped the same second always land in the same order — otherwise replaying
@@ -66,7 +59,7 @@ function byOccurrence(a: ProjectableEvent, b: ProjectableEvent): number {
   return d !== 0 ? d : a.eventCode.localeCompare(b.eventCode);
 }
 
-export function project(events: readonly ProjectableEvent[], opts: ProjectOptions): Projection {
+export function project(events: readonly ProjectableEvent[]): Projection {
   const ordered = [...events].sort(byOccurrence);
 
   let state: ShipmentState = 'created';
@@ -103,19 +96,28 @@ export function project(events: readonly ProjectableEvent[], opts: ProjectOption
     if (ev.mappedState === 'failed') failedAt = ev.occurredAt;
   }
 
-  // A parcel that left the office is no longer counting down.
-  const stillAtOffice = state === 'at_office';
-  const officeDeadline = stillAtOffice && officeArrivedAt
-    ? deadlineFrom(officeArrivedAt, opts.depositDays)
-    : null;
-
+  /*
+   * There is deliberately no deadline here any more.
+   *
+   * This used to compute one: `deadlineFrom(officeArrivedAt, depositDays)`,
+   * where `depositDays` came from a per-service number an operator typed into
+   * Settings — 15, flagged "still a guess", and never confirmed with anybody.
+   * Every countdown, last day and "goes back on" date in the system hung off
+   * it, which meant every one of them was an invention presented as a fact,
+   * including to customers.
+   *
+   * Correos does not say when a parcel will go back. What they do say, when it
+   * happens, is that it IS going back — "Finalizado plazo retirada", phase
+   * DEVOLUCION — and that event is what moves a parcel to `returning` now. So
+   * the projection keeps the fact (`officeArrivedAt`) and stops deriving a
+   * date from it.
+   */
   return {
     state,
     stateSince,
     officeArrivedAt,
     officeCode,
     officeName,
-    officeDeadline,
     failedAt,
     lastEventAt,
     preAdmittedAt,

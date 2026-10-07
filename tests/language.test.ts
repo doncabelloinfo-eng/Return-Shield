@@ -11,7 +11,7 @@ import { PARCEL_TABS } from '@/lib/views/parcels';
 import { parcelsView } from '@/lib/views/parcels';
 import { CLOSE_REASONS, CLOSE_REASON_KEYS } from '@/lib/escalation/close-reasons';
 import {
-  officeDetails, officeEmailSubject, DEFAULT_OFFICE_HOURS,
+  officeDetails, officeEmailSubject,
 } from '@/lib/messaging/build-message';
 import { marketplaceOrderLink } from '@/lib/orders/marketplace-link';
 import { resetDb, closeDb } from './helpers/db';
@@ -185,6 +185,19 @@ describe('badges and close reasons', () => {
 
 /* ========================================================================== */
 
+/**
+ * Real opening hours, as Correos would send them for an office they have
+ * actually named.
+ *
+ * It used to be `DEFAULT_OFFICE_HOURS`, exported from build-message.ts and
+ * used whenever an office had none — which, since Correos' events carry no
+ * office details at all, was every single message. Customers were being given
+ * opening times nobody had checked, so the fallback is gone and the sentence
+ * is simply left out. The constant lives here now because a test still needs
+ * an office that does have hours.
+ */
+const REAL_HOURS = 'L–V 08:30–20:30 · S 09:30–13:00';
+
 describe('customer-facing text stays Spanish', () => {
   it('still writes the office message in Spanish', () => {
     const text = officeDetails({
@@ -194,8 +207,9 @@ describe('customer-facing text stays Spanish', () => {
       shippingCode: 'PQ123456789ES',
       officeName: 'Oficina Madrid Sucursal 12',
       officeAddress: 'C/ Mejía Lequerica 8',
-      officeHours: DEFAULT_OFFICE_HOURS,
-      deadline: new Date('2026-10-20T21:59:59+02:00'),
+      officeHours: REAL_HOURS,
+      officeArrivedAt: new Date('2026-10-05T11:00:00+02:00'),
+      daysAtOffice: 3,
       actionUrl: null,
     });
 
@@ -240,8 +254,9 @@ describe('the two no-name changes, and only those two', () => {
     shippingCode: 'PKA6TP9800000000000001X',
     officeName: 'Oficina Madrid Sucursal 12',
     officeAddress: 'C/ Mejía Lequerica 8',
-    officeHours: DEFAULT_OFFICE_HOURS,
-    deadline: new Date('2026-10-20T21:59:59+02:00'),
+    officeHours: REAL_HOURS,
+    officeArrivedAt: new Date('2026-10-05T11:00:00+02:00'),
+    daysAtOffice: 3,
     actionUrl: null,
   };
 
@@ -274,11 +289,15 @@ describe('the two no-name changes, and only those two', () => {
     const nameless = officeDetails({ ...base, firstName: '', viaMarketplace: true });
 
     // Everything after the greeting is word for word the same.
+    //
+    // "Horario: " and "Último día para recogerlo:" are no longer in the list
+    // because neither is in the message. The hours line is left out unless
+    // Correos gave us real hours for that office, and the last day is gone
+    // altogether — it came off a deposit window nobody had confirmed.
     for (const part of [
       'te espera en Oficina Madrid Sucursal 12',
-      'Horario: ',
       'Enseña este código: PKA6TP9800000000000001X',
-      'Último día para recogerlo:',
+      'Recógelo cuanto antes: si no se recoge a tiempo, Correos lo devuelve.',
       'Si no puedes ir, dínoslo y lo reenviamos.',
     ]) {
       expect(named, part).toContain(part);

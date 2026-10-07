@@ -1,6 +1,6 @@
 import { officeView } from '@/lib/views/rows';
 import { getDb } from '@/db';
-import { productRules, stores } from '@/db/schema';
+import { stores } from '@/db/schema';
 import { ParcelTable } from '@/components/ParcelTable';
 import { OfficeFilters } from '@/components/OfficeFilters';
 import { PageHeading, Empty } from '@/components/ui';
@@ -11,18 +11,22 @@ import { PageHeading, Empty } from '@/components/ui';
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 /**
- * Every parcel a post office is holding, most urgent first. One decided next
- * step per row; everything else is behind the ⋯.
+ * Every parcel a post office is holding, longest-waiting first. One decided
+ * next step per row; everything else is behind the ⋯.
+ *
+ * "Most urgent" used to mean fewest days left, counted against a deposit
+ * window an operator typed in and nobody had confirmed. It now means longest
+ * at the office, counted from the day Correos said the parcel got there — the
+ * same ordering in practice, resting on a fact instead of a guess.
  */
 export default async function OfficePage({
   searchParams,
 }: {
   searchParams: { q?: string; store?: string; pay?: string; urg?: string };
 }) {
-  const [rows, storeRows, rules] = await Promise.all([
+  const [rows, storeRows] = await Promise.all([
     officeView(),
     getDb().select({ name: stores.name }).from(stores),
-    getDb().select().from(productRules),
   ]);
 
   const q = (searchParams.q ?? '').trim().toLowerCase();
@@ -36,22 +40,22 @@ export default async function OfficePage({
     if (store !== 'All shops' && r.storeName !== store) return false;
     if (pay !== 'Any payment' && (pay === 'COD' ? r.paymentMethod !== 'cod' : r.paymentMethod !== 'prepaid')) return false;
 
-    const d = r.daysLeftNumber;
+    // Days AT the office, not days left: the same three buckets, read off the
+    // day Correos said the parcel arrived rather than off a last day nobody
+    // ever confirmed with them.
+    const d = r.daysAtOffice;
     if (urg === '0–3' && !(d !== null && d <= 3)) return false;
     if (urg === '4–7' && !(d !== null && d >= 4 && d <= 7)) return false;
     if (urg === '8+' && !(d !== null && d >= 8)) return false;
     return true;
   });
 
-  const standard = rules.find((r) => r.productCode === 'PAQ ESTÁNDAR')?.depositDays
-    ?? rules[0]?.depositDays ?? 15;
-
   return (
     <div className="px-4 pb-10 pt-[18px]">
       <div className="flex flex-wrap items-end gap-[14px]">
         <PageHeading
           title="Post office"
-          note={`${rows.length} waiting · Correos sends them back when the countdown hits zero · they wait ${standard} days`}
+          note={`${rows.length} waiting · longest at the office first · Correos sends one back when its collection window runs out, and tells us when they do`}
         />
         <OfficeFilters
           stores={['All shops', ...storeRows.map((s) => s.name)]}

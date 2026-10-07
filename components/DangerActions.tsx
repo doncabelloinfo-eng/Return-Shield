@@ -16,6 +16,13 @@ import { useToast } from './Toast';
  * armed for the next person who walks past. Writing a parcel off asks for a
  * reason instead, which is a better second step than a second tap: it cannot
  * be clicked through, and it leaves something behind.
+ *
+ * The redirection button says "Mark", because that is all it does. Nothing in
+ * this system can tell Correos a new address — a person does that through Mi
+ * Oficina or on the phone, and this records it so the parcel stops asking.
+ * The label used to read "Send to a new address", with "Tap again — Correos
+ * charges" on the confirm, which together said the press itself would arrange
+ * and pay for a redirection.
  */
 export function DangerActions({
   shipmentId, dropped, canRedirect, closeReason = null, closeNote = '',
@@ -69,7 +76,7 @@ export function DangerActions({
           className="rounded border border-warn px-4 py-[13px] text-[13px] font-semibold text-warn disabled:opacity-60"
           style={{ background: armed === 'redirect' ? 'var(--warnsoft)' : 'transparent' }}
         >
-          {armed === 'redirect' ? 'Tap again — Correos charges' : 'Send to a new address'}
+          {armed === 'redirect' ? 'Tap again to confirm' : 'Mark new address as sent to Correos'}
         </button>
       )}
       <CloseParcel shipmentId={shipmentId} />

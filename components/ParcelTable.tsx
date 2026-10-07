@@ -18,7 +18,7 @@ export function ParcelTable({
       <table>
         <thead>
           <tr>
-            <Th>Deadline</Th>
+            <Th>At the office</Th>
             <Th>Customer</Th>
             <Th align="right">At risk</Th>
             {showOffice && <Th>Post office</Th>}
@@ -60,7 +60,11 @@ export function ParcelTable({
 
                 {showOffice && (
                   <td className="border-b border-line text-[12.5px] text-ink" style={{ padding: 'var(--rowpad)' }}>
-                    <a href={r.mapsHref} target="_blank" rel="noreferrer" className="text-ink">{r.officeName ?? '—'}</a>
+                    {/* No office from Correos means no name and no maps link,
+                        rather than a dash and a search for nothing. */}
+                    {r.officeName
+                      ? <a href={r.mapsHref} target="_blank" rel="noreferrer" className="text-ink">{r.officeName}</a>
+                      : null}
                     <div className="text-[11.5px] text-muted">{r.town}</div>
                   </td>
                 )}

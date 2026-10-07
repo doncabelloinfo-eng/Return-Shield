@@ -13,9 +13,17 @@ import { makeShipment } from './helpers/fixtures';
 
 /**
  * The whole ladder, from a failed delivery to the parcel going back, driven
- * forward by the injectable clock. Fifteen days of business in well under a
+ * forward by the injectable clock. A fortnight of business in well under a
  * second — which is the only reason anybody will ever run this before shipping
  * a change to the engine.
+ *
+ * The office rungs count FORWARD from the day Correos said the parcel reached
+ * the counter: +0, +3, +7, +11, +13. They used to count backwards from a last
+ * day worked out from a "deposit window" nobody had confirmed with Correos, and
+ * these are the same days that fifteen-day guess produced — so a parcel part
+ * way through the ladder when this changed does not shift and does not repeat a
+ * rung. There is no `o0` any more: it fired when our own arithmetic said the
+ * window was up, and Correos say that themselves with an event.
  */
 
 let clock: TestClock;
@@ -28,7 +36,9 @@ beforeEach(async () => {
   // correct behaviour and makes for a confusing test.
   clock = new TestClock('2026-09-01T10:00:00+02:00');
   restore = clock.install();
-  // Step 2, so the ladder sends messages itself and the test can count them.
+  // phase 2 plus a provider that can send, so the ladder sends the messages
+  // itself and the test can count them. No screen sets this any more; the
+  // engine still reads it, and this is the file that proves it still works.
   await setSetting('phase', 2);
 });
 
@@ -69,7 +79,7 @@ const sentMessages = (id: string) =>
 
 describe('the ladder, from a failed delivery to a return', () => {
   it('walks every rung in order, on the day each is due', async () => {
-    const f = await makeShipment({ depositDays: 15, valueCents: 14850, paymentMethod: 'cod' });
+    const f = await makeShipment({ valueCents: 14850, paymentMethod: 'cod' });
 
     // The postman calls and nobody is home.
     await push(f.shippingCode, 'Intento de entrega fallido — ausente', clock.now());
@@ -100,52 +110,64 @@ describe('the ladder, from a failed delivery to a return', () => {
     await runShipment(f.shipmentId, clock.now());
     expect((await openTasks(f.shipmentId)).some((t) => t.type === 'call')).toBe(true);
 
-    // Correos moves it to the counter. The countdown starts from their event,
-    // never from our arithmetic.
+    // Correos moves it to the counter. Everything from here is counted from
+    // THEIR event, and nothing is counted towards a last day they never gave.
     const arrived = clock.advanceHours(24);
     await push(f.shippingCode, 'Disponible en oficina para recoger', arrived, f.officeCode);
     ship = (await getDb().select().from(shipments).where(eq(shipments.id, f.shipmentId)))[0];
     expect(ship.state).toBe('at_office');
-    expect(ship.officeDeadline).not.toBeNull();
+    expect(ship.officeArrivedAt).not.toBeNull();
+    expect(ship.officeDeadline).toBeNull();
 
-    // The office details go out straight away, with the real last day in them.
+    // The office details go out straight away. No date in them, because
+    // nobody told us one.
     await runShipment(f.shipmentId, clock.now());
     msgs = await sentMessages(f.shipmentId);
     const details = msgs.find((m) => m.template === 'office_details');
     expect(details).toBeDefined();
     expect(details!.body).toContain('Oficina Madrid Sucursal 12');
     expect(details!.body).toContain(f.shippingCode);
+    expect(details!.body).toContain('si no se recoge a tiempo, Correos lo devuelve');
 
-    // Then each rung on its own day, counted back from the deadline.
+    // Then each rung on its own day, counted forward from the arrival.
     const seen = async () => (await sentMessages(f.shipmentId)).map((m) => m.template);
 
-    clock.advanceDays(3); // 12 days left
+    clock.advanceDays(3); // +3 days at the office
     await runShipment(f.shipmentId, clock.now());
     expect(await seen()).toContain('office_reminder');
 
-    clock.advanceDays(4); // 8 days left
+    clock.advanceDays(4); // +7
     await runShipment(f.shipmentId, clock.now());
     expect(await seen()).toContain('office_elsewhere');
 
-    clock.advanceDays(4); // 4 days left
+    clock.advanceDays(4); // +11
     await runShipment(f.shipmentId, clock.now());
     expect(await seen()).toContain('office_four_days');
+    const fourth = (await sentMessages(f.shipmentId)).find((m) => m.template === 'office_four_days');
+    expect(fourth!.body).toContain('lleva 11 días');
 
-    clock.advanceDays(2); // 2 days left — last warning plus a call
+    clock.advanceDays(2); // +13 — last reminder plus a call
     await runShipment(f.shipmentId, clock.now());
     expect(await seen()).toContain('office_last_call');
+    const last = (await sentMessages(f.shipmentId)).find((m) => m.template === 'office_last_call');
+    expect(last!.body).toContain('lleva 13 días');
     const mustCall = (await openTasks(f.shipmentId)).find((t) => t.type === 'call');
     expect(mustCall?.label).toContain('Must call');
     expect(mustCall?.label).toContain('cash on delivery');
 
-    // Out of time. The system flags it and tells somebody — it does not
-    // invent a Correos event that never happened.
+    // And then nothing. Two more days go by and the system stays quiet: it has
+    // said everything it can honestly say, and whether the window is up is
+    // Correos' to announce. `o0` used to fire here, on our own arithmetic.
     clock.advanceDays(2);
     await runShipment(f.shipmentId, clock.now());
     const fired = await getDb().select().from(escalationFires)
       .where(eq(escalationFires.shipmentId, f.shipmentId));
-    expect(fired.map((x) => x.rungId)).toContain('o0');
-    expect((await openTasks(f.shipmentId)).some((t) => t.reason === 'deposit_window_over')).toBe(true);
+    expect(fired.map((x) => x.rungId)).not.toContain('o0');
+    expect((await openTasks(f.shipmentId)).some((t) => t.reason === 'deposit_window_over')).toBe(false);
+    expect(await seen()).toEqual([
+      'failed_first', 'failed_reminder', 'office_details', 'office_reminder',
+      'office_elsewhere', 'office_four_days', 'office_last_call',
+    ]);
 
     // And when Correos does say it is coming back, everything stops and the
     // only job left is the stock.
@@ -157,8 +179,8 @@ describe('the ladder, from a failed delivery to a return', () => {
     expect(finalTasks.some((t) => t.type === 'contact')).toBe(false);
   });
 
-  it('runs the whole fifteen days in one sweep after an outage', async () => {
-    const f = await makeShipment({ depositDays: 15 });
+  it('runs the whole fortnight in one sweep after an outage', async () => {
+    const f = await makeShipment();
     await push(f.shippingCode, 'Disponible en oficina para recoger', clock.now(), f.officeCode);
 
     // The worker was down for a fortnight. Every rung is due at once, and they

@@ -3,7 +3,8 @@
 import { useToast } from './Toast';
 
 /**
- * Step 1 is copy-and-paste, so this button is the product. It never silently
+ * Nothing sends itself today, so copy-and-paste IS the product and this button
+ * is the whole of it. It never silently
  * fails: if the clipboard is blocked the text is selected instead, and the
  * toast says so rather than claiming success.
  */

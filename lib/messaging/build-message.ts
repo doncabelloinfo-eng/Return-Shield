@@ -1,5 +1,5 @@
 import type { BuiltMessage, MessageContext, MessageTemplate } from './types';
-import { shortDateEs } from '@/lib/time';
+
 
 /**
  * Every word a customer reads, in one file.
@@ -8,16 +8,26 @@ import { shortDateEs } from '@/lib/time';
  * the prototype rendered "16 Sep" from an English month table, and these
  * messages are read by Spanish customers, so the month is Spanish here.
  * See DECISIONS.md — it is a one-line revert if that is not wanted.
+ *
+ * NO MESSAGE STATES A DATE CORREOS DID NOT GIVE US.
+ *
+ * Every one of these used to name a last day — "Último día para recogerlo: 16
+ * sep", "el 16 sep tu pedido se devuelve automáticamente" — worked out from a
+ * fifteen-day deposit window somebody typed into Settings and nobody had ever
+ * confirmed with Correos. That is not a date to put in front of a customer: on
+ * a service held longer it brings them in a week early in a panic, on a
+ * shorter one it tells them they have time they do not have.
+ *
+ * What Correos does tell us is the day the parcel reached the counter. So the
+ * messages say how long it has been waiting and that it will go back if it is
+ * not collected, which is true, urgent and ours to say.
  */
 
 const DEFAULT_LINK = 'Ver el estado de mi pedido';
 
-/** The office hours line, until the real per-office hours are loaded. */
-export const DEFAULT_OFFICE_HOURS = 'L–V 08:30–20:30 · S 09:30–13:00';
-
 export function buildMessage(template: MessageTemplate, ctx: MessageContext): BuiltMessage {
-  const deadline = ctx.deadline ? shortDateEs(ctx.deadline) : 'los próximos días';
   const office = ctx.officeName ?? 'tu oficina de Correos';
+  const days = ctx.daysAtOffice ?? 0;
 
   switch (template) {
     case 'failed_first':
@@ -47,7 +57,7 @@ export function buildMessage(template: MessageTemplate, ctx: MessageContext): Bu
       return {
         template,
         body: `Recuerda: tu pedido sigue esperándote en ${office}. `
-          + `Si no lo recoges antes del ${deadline} volverá a origen.`,
+          + 'Si no se recoge a tiempo, Correos lo devuelve.',
         linkLabel: DEFAULT_LINK,
       };
 
@@ -61,15 +71,16 @@ export function buildMessage(template: MessageTemplate, ctx: MessageContext): Bu
     case 'office_four_days':
       return {
         template,
-        body: `Quedan 4 días: el ${deadline} tu pedido ${ctx.orderNumber} `
-          + 'se devuelve automáticamente.',
+        body: `Tu pedido ${ctx.orderNumber} lleva ${days} días en ${office}. `
+          + 'Recógelo pronto para que no vuelva a origen.',
         linkLabel: DEFAULT_LINK,
       };
 
     case 'office_last_call':
       return {
         template,
-        body: `ÚLTIMO AVISO: quedan 2 días. El ${deadline} tu pedido se devuelve y se cancela.`,
+        body: `ÚLTIMO AVISO: tu pedido ${ctx.orderNumber} lleva ${days} días en ${office}. `
+          + 'Si no se recoge, Correos lo devolverá y el pedido se cancelará.',
         linkLabel: 'Resolverlo ahora',
       };
   }
@@ -78,14 +89,26 @@ export function buildMessage(template: MessageTemplate, ctx: MessageContext): Bu
 /**
  * The message the operator copies into WhatsApp. Everything the customer needs
  * to walk into the right building and come out with the parcel: which office,
- * where it is, when it is open, what to show at the counter, and the real last
- * day — never a hardcoded fortnight.
+ * where it is, when it is open if we actually know, and what to show at the
+ * counter.
+ *
+ * What it no longer carries is a last day. See the note at the top of the file.
  */
 export function officeDetails(ctx: MessageContext): string {
-  const deadline = ctx.deadline ? shortDateEs(ctx.deadline) : 'los próximos días';
   const office = ctx.officeName ?? 'tu oficina de Correos';
   const address = ctx.officeAddress ? `, ${ctx.officeAddress}` : '';
-  const hours = ctx.officeHours ?? DEFAULT_OFFICE_HOURS;
+  /*
+   * The hours sentence is left out entirely when Correos has given us none.
+   *
+   * It used to fall back to a hard-coded `L–V 08:30–20:30 · S 09:30–13:00`,
+   * and since today's events carry no office details at all, that meant every
+   * customer was told opening times nobody had checked. A customer who turns
+   * up to a closed door because of a line we invented is worse off than one
+   * who looks the hours up.
+   */
+  const hours = ctx.officeHours?.trim()
+    ? `Horario: ${ctx.officeHours.trim()}. `
+    : '';
 
   /*
    * Two changes for the marketplace parcels, and only these two.
@@ -104,9 +127,9 @@ export function officeDetails(ctx: MessageContext): string {
 
   return `${greeting}${who}. `
     + `Tu pedido ${ctx.orderNumber} te espera en ${office}${address}. `
-    + `Horario: ${hours}. `
+    + hours
     + `Enseña este código: ${ctx.shippingCode}. `
-    + `Último día para recogerlo: ${deadline}. `
+    + 'Recógelo cuanto antes: si no se recoge a tiempo, Correos lo devuelve. '
     + 'Si no puedes ir, dínoslo y lo reenviamos.';
 }
 

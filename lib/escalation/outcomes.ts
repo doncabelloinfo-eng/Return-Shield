@@ -213,8 +213,8 @@ export async function sendRedirect(shipmentId: string, userId?: string): Promise
   await getDb().insert(contactLog).values({
     shipmentId, at: now(), outcome: 'New address sent to Correos', note: '', userId: userId ?? null,
   });
-  await say(`${ctx.name} — new address sent to Correos (they charge for this one)`, shipmentId);
-  return { toast: 'New address sent to Correos.' };
+  await say(`${ctx.name} — new address marked as sent to Correos`, shipmentId);
+  return { toast: 'Noted — the new address is marked as sent to Correos.' };
 }
 
 /**
@@ -311,8 +311,8 @@ export async function askCorreos(shipmentId: string, userId?: string): Promise<O
   await getDb().insert(contactLog).values({
     shipmentId, at: now(), outcome: 'Asked Correos', note: '', userId: userId ?? null,
   });
-  await say(`${ctx.name} — asked Correos what happened to ${ctx.shippingCode}`, shipmentId);
-  return { toast: `Asked Correos about ${ctx.shippingCode}.` };
+  await say(`${ctx.name} — marked as asked Correos about ${ctx.shippingCode}`, shipmentId);
+  return { toast: `Noted — ${ctx.shippingCode} is marked as asked.` };
 }
 
 /** "Confirm the address now" — the before-anything-went-wrong action. */

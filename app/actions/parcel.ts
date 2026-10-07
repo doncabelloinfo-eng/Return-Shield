@@ -96,7 +96,7 @@ export async function confirmAddressNow(shipmentId: string) {
 }
 
 /**
- * Step 1: the operator copied the message and sent it themselves. Recording it
+ * The operator copied the message and sent it themselves. Recording it
  * is what stops the parcel looking un-contacted on tomorrow's list.
  */
 export async function markMessageCopied(notificationId: string) {

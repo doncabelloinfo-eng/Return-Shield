@@ -9,6 +9,7 @@ import { madridParts, madridMidnightUtc, madridDateKey, human, shortDate } from 
 import { normalisePayload } from '@/lib/carriers/correos/normalise';
 import { MAX_BATCH, trackpub } from '@/lib/carriers/correos/trackpub';
 import { ingestEvent, settleHistory } from '@/lib/shipments/ingest';
+import { remapKnownEvents } from '@/lib/shipments/remap';
 import { liveShipmentIds } from '@/lib/shipments/repo';
 import { runTick } from '@/lib/escalation/run';
 import { openTask } from '@/lib/escalation/tasks';
@@ -48,14 +49,23 @@ export function pushConfigured(): boolean {
 }
 
 /**
- * Every scheduled job. The order is the order they appear on the Settings
- * screen: the ones that matter most first.
+ * The jobs that are actually scheduled. The order is the order they appear on
+ * the Settings screen: the ones that matter most first.
+ *
+ * `push-drain` (every five minutes) and `push-heartbeat` (hourly) are no
+ * longer in it. Push is not configured and is not being turned on, so between
+ * them they fired about three hundred times a day and every single run
+ * recorded "push not configured" — nine of the ten rows in the Scheduled jobs
+ * panel were about a feature nobody is using, and the panel's whole job is to
+ * show at a glance that the engine is alive.
+ *
+ * Their code, their routes and the receiver are untouched: see
+ * `PAUSED_JOB_NAMES` below. Putting them back is two lines in vercel.json and
+ * a move between these two lists.
  */
 export const JOB_NAMES = [
   'escalation-tick',
   'reconcile',
-  'push-drain',
-  'push-heartbeat',
   'shopify-backfill',
   'stale-detector',
   'daily-digest',
@@ -64,7 +74,17 @@ export const JOB_NAMES = [
   'housekeeping',
 ] as const;
 
-export type JobName = typeof JOB_NAMES[number];
+/**
+ * Jobs that still exist and are not scheduled.
+ *
+ * They keep their place in `JobName` — the routes, the job lock and
+ * `runJob` all still work, so hitting one by hand does exactly what it always
+ * did — and they are left out of everything that lists the schedule:
+ * vercel.json, the Settings panel, and the test that holds those two in step.
+ */
+export const PAUSED_JOB_NAMES = ['push-drain', 'push-heartbeat'] as const;
+
+export type JobName = typeof JOB_NAMES[number] | typeof PAUSED_JOB_NAMES[number];
 
 export interface JobResult {
   detail: Record<string, unknown>;
@@ -225,11 +245,30 @@ const URGENT_STATES = ['failed', 'at_office', 'bad_address'];
  * choice rather than by being killed half way through a sweep.
  */
 export async function reconcile(opts: ReconcileOptions = {}): Promise<JobResult> {
+  /*
+   * Re-apply the state map to the events we already hold, BEFORE anything is
+   * asked of Correos — and before the credentials are even checked, because
+   * this is local work that does not need them.
+   *
+   * A wording added in a deploy has to reach the parcels already sitting in
+   * the wrong tab, and the one it matters most for — "Finalizado plazo
+   * retirada", a collection window that has closed — is exactly the parcel
+   * Correos has nothing further to say about, so waiting for its next event
+   * means waiting for ever. Cheap when nothing changed: one grouped scan over
+   * the distinct events. See lib/shipments/remap.ts.
+   */
+  const remap = await remapKnownEvents();
+
   const knownMode = await getSetting('correosBatchMode');
   const client = trackpub({ batchMode: knownMode });
 
   if (!client.configured) {
-    return { detail: { skipped: 'Correos credentials are not configured' } };
+    return {
+      detail: {
+        skipped: 'Correos credentials are not configured',
+        ...(remap.events ? { remappedEvents: remap.events, remappedParcels: remap.moved } : {}),
+      },
+    };
   }
 
   // `envNumber`, not `Number(… ?? default)`: `Number('')` is 0, so an empty
@@ -289,6 +328,13 @@ export async function reconcile(opts: ReconcileOptions = {}): Promise<JobResult>
    */
   let news = 0;
 
+  /**
+   * Parcels Correos told us something new about. The Refresh button reports
+   * this as "M changed", so it counts PARCELS rather than events: a parcel
+   * whose whole history arrived in one go changed once, not eleven times.
+   */
+  const changedParcels = new Set<string>();
+
   let asked = 0;
   let recovered = 0;
   let missing = 0;
@@ -330,6 +376,7 @@ export async function reconcile(opts: ReconcileOptions = {}): Promise<JobResult>
           if (ingested.status === 'inserted') {
             recovered += 1;
             if (!history) news += 1;
+            if (ingested.shipmentId) changedParcels.add(ingested.shipmentId);
           }
         }
 
@@ -407,6 +454,7 @@ export async function reconcile(opts: ReconcileOptions = {}): Promise<JobResult>
   return {
     detail: {
       asked,
+      changed: changedParcels.size,
       ...(news !== recovered ? { news } : {}),
       recovered,
       missing,
@@ -417,6 +465,8 @@ export async function reconcile(opts: ReconcileOptions = {}): Promise<JobResult>
       stillToCheck: remaining?.n ?? 0,
       tookMs: Date.now() - elapsedFrom,
       ...(settledHistory ? { settledHistory } : {}),
+      ...(remap.events ? { remappedEvents: remap.events, remappedParcels: remap.moved } : {}),
+      ...(remap.resolved.length ? { nowRecognised: remap.resolved } : {}),
       ...(stoppedEarly ? { stoppedEarly } : {}),
       ...(failures.length ? { failures: failures.slice(0, 10) } : {}),
     },

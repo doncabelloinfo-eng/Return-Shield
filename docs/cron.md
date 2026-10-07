@@ -12,8 +12,8 @@ can occasionally fire twice, and two runs can overlap. Three mechanisms in
 |---|---|---|---|
 | `escalation-tick` | `*/30 * * * *` | 60 | The heartbeat the engine banner is calibrated against. |
 | `reconcile` | `10 */3 * * *` | 300 | Batches of 100 codes, urgent parcels first. |
-| `push-drain` | `*/5 * * * *` | 60 | Returns at once while push is unconfigured. |
-| `push-heartbeat` | `5 * * * *` | 30 | Skips entirely while push is unconfigured. |
+| ~~`push-drain`~~ | **not scheduled** | 60 | Taken off the schedule: push is not configured and is not being turned on, so it recorded "push not configured" every five minutes. Route and receiver intact. |
+| ~~`push-heartbeat`~~ | **not scheduled** | 30 | Same. |
 | `shopify-backfill` | `15 * * * *` | 120 | |
 | `stale-detector` | `0 * * * *` | 60 | Catch-up, from Madrid hour 7. |
 | `daily-digest` | `0 * * * *` | 60 | Catch-up, from Madrid hour 8. |
@@ -96,14 +96,55 @@ showed green on the day it failed. It now returns 500. Vercel does not retry on
 500, so this changes nothing about the schedule — it is purely about the log
 telling the truth.
 
-## Two jobs the brief's table left out
+## The Refresh button is the same sweep, not a second one
+
+The **Refresh** button in the main menu runs `reconcile` — the same function,
+the same urgent-first cursor, and the same `job_locks` row as the three-hourly
+cron. That last part is the whole design:
+
+- the button cannot start while the cron holds the lock, and says so;
+- the cron cannot start while the button holds it, and records a `skipped:
+  locked` run as it always has;
+- whichever loses does nothing rather than quietly doing it twice. Two sweeps
+  at once would spend the Correos quota twice on the same parcels and race each
+  other's `last_reconciled_at` stamps, which is the cursor the sweep depends
+  on.
+
+A manual run is written to `job_runs` as an ordinary `reconcile` row with
+`manual: true` in its detail, so it shows up in the Scheduled jobs panel, keeps
+the engine-health banner quiet, and is what "Last checked 12 minutes ago" reads.
+There is a five-minute guard on top, which is a courtesy rather than a
+correctness rule — the lock is what stops overlap; the guard stops twenty
+presses in a minute spending the quota on parcels that were up to date thirty
+seconds ago.
+
+`MANUAL_SWEEP_BUDGET_MS` bounds it (240,000 by default) and the lease is
+derived from that plus grace, the same way the cron routes derive theirs from
+`maxDuration`. A run cut short says how many parcels are left; they lead the
+queue on the next press or the next cron tick, because the ordering is the
+cursor.
+
+The same path, with `onlyUnswept`, runs after a Shopify history pull and after
+a confirmed TikTok or Amazon upload — otherwise the new parcels sit in
+*Pre-admission* for up to three hours, which for one already waiting at a post
+office is three hours nobody can see.
+
+## Two jobs that are no longer scheduled
 
 **`push-drain`** is load-bearing when push is in use. The Correos receiver
 returns 200 and writes the raw body to `correos_push_inbox`; nothing becomes an
-event until this runs. Push is **not** configured at the moment, so the job
-returns `{ skipped: 'push not configured' }` immediately and reconcile is the
-only source of events. It runs every 5 minutes rather than every minute: at one
-minute it was 1,440 invocations a day to do nothing.
+event until this runs. Push is **not** configured and is not being turned on,
+so the job returned `{ skipped: 'push not configured' }` roughly 288 times a
+day — and with `push-heartbeat` alongside it, nine of the ten rows in the
+Scheduled jobs panel were about a feature nobody uses, on the one screen whose
+job is to show at a glance that the engine is alive.
+
+Both are therefore **off `vercel.json`** and listed in `PAUSED_JOB_NAMES`
+instead of `JOB_NAMES`. Their routes, their code and the receiver are
+untouched: hitting one by hand does exactly what it always did, and putting
+them back is a move between those two lists plus two lines of `vercel.json`.
+`tests/cron-auth.test.ts` holds the three in step, so a route cannot fall off
+the schedule without somebody deciding it should.
 
 > An alternative on Vercel is `waitUntil()` from `@vercel/functions`, letting
 > the receiver process after responding. We kept the staging table because it

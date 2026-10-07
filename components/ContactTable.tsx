@@ -6,11 +6,13 @@ import { AlertBadge, Empty, PayBadge, Th } from './ui';
 
 /**
  * The parcels to ring about today: Correos tried, nobody took it, and it is
- * now sitting at a post office with a countdown running.
+ * now sitting at a post office, and every day it sits there is a day closer to
+ * Correos sending it back.
  *
  * Every row carries everything needed to contact the customer without opening
  * the parcel — the phone, the WhatsApp link with the finished Spanish text,
- * the email, the office and its address, the last day and the attempts. That
+ * the email, the office and its address, how long it has been waiting and the
+ * attempts. That
  * is the point of the tab: it is a worklist, and a worklist that needs a click
  * per row to become useful is a list of links.
  *
@@ -40,7 +42,7 @@ export function ContactTable({ rows }: { rows: ParcelListRow[] }) {
             <Th>Customer</Th>
             <Th>Phone</Th>
             <Th>Office</Th>
-            <Th>Last day</Th>
+            <Th>At the office</Th>
             <Th align="right">Value</Th>
             <Th>Get in touch</Th>
           </tr>
@@ -77,31 +79,40 @@ export function ContactTable({ rows }: { rows: ParcelListRow[] }) {
                   {r.email && <div className="mt-[2px] break-all font-mono text-[11px] text-muted">{r.email}</div>}
                 </td>
 
+                {/*
+                  Nothing at all when Correos named no office, rather than
+                  "not said yet" on every row plus a maps link that searches
+                  for an empty string. Today's events carry no office details,
+                  so that was every row.
+                */}
                 <td className="border-b border-line px-3 py-[10px] text-[12.5px]">
-                  {r.officeName
-                    ? (
-                      <>
-                        <div className="font-medium text-ink">{r.officeName}</div>
-                        {r.officeAddress && <div className="text-[11.5px] text-muted">{r.officeAddress}</div>}
-                        <a href={r.mapsHref} target="_blank" rel="noreferrer"
-                          className="mt-[3px] inline-block text-[11.5px] font-semibold text-navy underline-offset-2 hover:underline">
-                          Open in maps
-                        </a>
-                      </>
-                    )
-                    : <span className="text-muted">not said yet</span>}
+                  {r.officeName && (
+                    <>
+                      <div className="font-medium text-ink">{r.officeName}</div>
+                      {r.officeAddress && <div className="text-[11.5px] text-muted">{r.officeAddress}</div>}
+                      <a href={r.mapsHref} target="_blank" rel="noreferrer"
+                        className="mt-[3px] inline-block text-[11.5px] font-semibold text-navy underline-offset-2 hover:underline">
+                        Open in maps
+                      </a>
+                    </>
+                  )}
                 </td>
 
+                {/*
+                  Since when, and how long — not a last day. Correos' at-the-
+                  office event carries no date beyond its own, so the last day
+                  this column used to show was arithmetic on a guess.
+                */}
                 <td className="whitespace-nowrap border-b border-line px-3 py-[10px] text-[12.5px]">
-                  {r.deadline
+                  {r.atOffice
                     ? (
                       <>
-                        <div className="text-ink" title={r.deadlineExact ?? undefined}>{r.deadline}</div>
-                        {r.daysLeft !== null && (
-                          <div className={`text-[11.5px] font-semibold ${r.daysLeft <= 2 ? 'text-crit' : 'text-muted'}`}>
-                            {r.daysLeft} {r.daysLeft === 1 ? 'day' : 'days'} left
-                          </div>
-                        )}
+                        <div className="text-ink" title={r.atOffice.sinceExact}>
+                          since {r.atOffice.since}
+                        </div>
+                        <div className={`text-[11.5px] font-semibold ${r.atOffice.late ? 'text-crit' : 'text-muted'}`}>
+                          {r.atOffice.days} {r.atOffice.days === 1 ? 'day' : 'days'} at the office
+                        </div>
                       </>
                     )
                     : <span className="text-muted">—</span>}
@@ -153,6 +164,19 @@ export function ContactTable({ rows }: { rows: ParcelListRow[] }) {
                       <CopyButton text={r.orderNumber} said={`Order ${r.orderNumber} copied.`} className={button}>
                         Copy order number
                       </CopyButton>
+                    )}
+
+                    {/*
+                      The same thing for the Shopify rows, built from the shop
+                      domain and the numeric order id rather than a configured
+                      template — the admin lives at one address for every shop.
+                      Shown whether or not there is a phone: the reason to open
+                      the order is the address and the line items, not contact.
+                    */}
+                    {r.shopifyHref && (
+                      <a href={r.shopifyHref} target="_blank" rel="noreferrer" className={button}>
+                        Open in Shopify
+                      </a>
                     )}
                   </div>
 

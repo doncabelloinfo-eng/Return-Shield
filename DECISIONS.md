@@ -538,7 +538,106 @@ still works and takes one more paste.
 
 ---
 
-## 5. Where I departed from the prototype
+## 5. The return date was a guess, so it is gone
+
+### What the guess was, and what it reached
+
+Correos holds a parcel at a post office for a while and then sends it back. The
+system used to work out when: `arrival + depositDays`, where `depositDays` came
+from a per-service number an operator nudged up and down on the Settings
+screen. It started at 15, carried a checkbox reading **"Still a guess"**, and
+nobody ever confirmed it with Correos — who do not publish it and do not send
+it.
+
+Everything downstream of that number was therefore an invention presented as a
+fact: the big number on Today and the parcel page, the "goes back" column on
+Parcels, the "Last day" column in the Missed-delivery worklist, the ordering of
+the Post office list, the colour of every row, the countdown on the customer's
+own `/e/{token}` page, and four customer messages that named the date outright
+— *"Último día para recogerlo: 16 sep"*, *"el 16 sep tu pedido se devuelve
+automáticamente"*.
+
+On a service Correos hold for longer, that brought a customer in a week early
+in a panic. On a shorter one it told them they had time they did not have.
+
+### What replaced it
+
+The one date Correos does give us: the moment the parcel reached the counter,
+`H01I350V` / "A disposición del destinatario", stored as
+`shipments.office_arrived_at`. Every screen now counts **forward** from it —
+**"At the office since 23 Sep · 14 days"** — and goes red at eleven days, which
+is the day of the fourth reminder, so the screen gets louder on the same day
+the customer hears from us again.
+
+And when the parcel actually goes back, Correos say so themselves:
+`L03D320R`, phase `DEVOLUCION`. That event is what moves a parcel to *Coming
+back* now, with their date on it, and it raises the alert that our own
+arithmetic used to raise early or late.
+
+`office_deadline` is still a column. Nothing computes it and nothing reads it;
+`reproject` writes an explicit null. Dropping it would need a migration run in
+the right order against a fork somebody has to click **Sync fork** on, which is
+a real cost for no benefit — and `tests/no-invented-date.test.ts` is what stops
+anybody filling it in again.
+
+### The ladder kept its rung ids on purpose
+
+The office reminders fire on the same days they always did — day of arrival,
++3, +7, +11, +13 — because 15 − 12 = 3 and 15 − 8 = 7: the old ids were days
+*left* against the guess, and they are days *after arrival* now. Keeping
+`o15`…`o2` means a parcel part way up the ladder when this changed does not
+shift and does not get a reminder twice.
+
+`o0` is gone rather than renamed. It fired when our arithmetic said the window
+was up, raised an alert and opened a "confirm with Correos" task. Correos
+announce the return themselves, so that rung was only ever a guess arriving
+early or late.
+
+### Office details: only what Correos gave
+
+`officeDetails` used to fall back to a hard-coded `L–V 08:30–20:30 · S
+09:30–13:00` whenever an office had no hours — and since today's events carry
+no office details at all, that was every single message. Customers were being
+given opening times nobody had checked. The sentence is now left out when there
+are no real hours, and the Office column, the office line and the maps link are
+hidden rather than showing "not said yet" beside a search for an empty string.
+
+---
+
+## 6. Taking off the screen everything that does not work yet
+
+The operator has to be able to see how far the system really goes. A control
+that does nothing in today's set-up makes that impossible — on 7 October the
+Step 1 / Step 2 switch was flipped back and forth several times and nothing
+changed.
+
+Everything below is **hidden or relabelled, never deleted**. Each one comes
+back on its own the moment the thing behind it exists.
+
+| What | Was | Now | Comes back when |
+| --- | --- | --- | --- |
+| The top-bar switch | "Step 1 — just for us / Step 2 — we message customers" | gone | a WhatsApp provider is configured; `settings.phase` is still stored and still read |
+| Connections → WhatsApp | "WhatsApp — Step 1 · **Connected**" | no row | `WHATSAPP_PROVIDER` is anything but `none` |
+| Connections → Correos live push | "Correos live push · Not set up" | no row | `CORREOS_PUSH_CLIENT_ID` / `_SECRET` are set |
+| `push-drain`, `push-heartbeat` | every 5 minutes / hourly, ~300 runs a day recording "push not configured" | off `vercel.json` and off the Scheduled jobs list | move them from `PAUSED_JOB_NAMES` back to `JOB_NAMES` and add two lines to `vercel.json` |
+| Restock buttons | "Put back in stock" / "Put all back in stock" | "Mark as back in stock" | the Shopify token gains write scope; the record itself always worked |
+| Redirection button | "Send to a new address", confirming with "Tap again — Correos charges" | "Mark new address as sent to Correos" | something can actually tell Correos a new address |
+| Chase buttons | "Ask Correos about this one", "Fix address with Correos", "Book another delivery" | "Mark as asked Correos", "Mark address as fixed with Correos", "Mark new delivery as booked" | same |
+| Connections → Email | *nothing at all* | a row saying **Not set up**, with "alerts and the daily digest only go to the logs" | `SMTP_HOST` and `MAIL_TO` are set |
+
+The Email row is an addition rather than a removal, and it is the same kind of
+problem the rest of this list is: `sendInternalAlert` logs to stdout and returns
+`logged` when no SMTP host is configured, `logged` counts as delivered on
+purpose — a daily job that threw for want of a mail server would fail every day
+on every dev machine — and so an alert nobody will ever read was stored as
+sent, with nothing on any screen saying whether a single email had ever left.
+
+The demo clock controls were already hidden behind `DEMO_MODE`, and are left
+alone.
+
+---
+
+## 7. Where I departed from the prototype
 
 The prototype is the specification, and I ported it. These are the places I did
 not, and why. Each one is a small revert if you disagree.
@@ -645,7 +744,7 @@ database so the dashboard and the worker agree about what time it is.
 
 ---
 
-## 6. Things I chose, where the brief left it open
+## 8. Things I chose, where the brief left it open
 
 | | Chose | Why |
 |---|---|---|
@@ -658,7 +757,7 @@ database so the dashboard and the worker agree about what time it is.
 
 ---
 
-## 7. Still open
+## 9. Still open
 
 - **`CRON_SECRET` must be set in production.** Every cron route refuses every
   request without it. That is deliberate — an open endpoint that sweeps the
@@ -669,19 +768,24 @@ database so the dashboard and the worker agree about what time it is.
   was last heard from. What is still open is that nobody is *told* — there is no
   push, no SMS, nothing that reaches somebody who is not looking at the screen.
   If the business depends on this, that is the next thing to add.
-- **The deposit window.** 15 days is unconfirmed. The Settings screen shows an
-  amber banner until somebody ticks each service off, and every countdown is an
-  estimate until then. It may also differ per service — the table is per
-  product code so that is already possible.
-- **Correos event codes.** `BY_CODE` in `state-map.ts` is deliberately empty:
-  every mapping currently matches on the Spanish wording, which is all the
-  prototype gave us. Guessing a numeric code is worse than falling back to the
-  wording, because a wrong code maps silently while a missing one asks a human.
-  Fill it in from real traffic — the Settings screen lists everything Correos
-  has said that we do not recognise.
-- **Office opening hours** are currently one default string for every office.
-  Correos' push payload carries an office code; if their API exposes hours per
-  office, `offices.opening_hours` is waiting for them.
+- **~~The deposit window~~ — settled: there isn't one.** It was a guess and it
+  is gone; see section 5. Nothing in the system claims to know when a parcel
+  goes back, and Correos tell us when they send one.
+- **Correos event codes.** `BY_CODE` in `state-map.ts` holds the five confirmed
+  against real traffic. Guessing a numeric code is worse than falling back to
+  the wording, because a wrong code maps silently while a missing one asks a
+  human — so one is only added once a stored payload has been seen carrying it.
+  The code for "Intento de entrega. Ausente" is the one still missing: that
+  wording maps correctly by its text, and `remapKnownEvents` records the real
+  code against the review-queue row it resolves, so it can be read off the
+  Settings screen rather than guessed.
+- **Office opening hours.** Correos' events carry no office details at all —
+  `location` is empty in every sample — so there are no hours for any office,
+  and the messages and screens now leave the office out rather than filling the
+  gap. `offices.opening_hours` is waiting for an API that exposes them.
+- **Two wordings waiting on Correos:** `Desestacionado` and `Entrega
+  modificada`. Neither meaning is clear from the words alone, so both sit in
+  the review queue on the Settings screen until somebody asks.
 - **Which store a TikTok upload belongs to.** Every upload goes to one
   `tiktok-es` store. If you run more than one TikTok shop, the import screen
   needs a picker.
@@ -692,7 +796,7 @@ database so the dashboard and the worker agree about what time it is.
 
 ---
 
-## 8. What I would do next
+## 10. What I would do next
 
 1. **Point it at the Correos mock.** `CORREOS_TRACKPUB_BASE_URL` already
    exists; the push receiver can be pointed at from their Postman collection.
@@ -701,7 +805,11 @@ database so the dashboard and the worker agree about what time it is.
    sends lands on the Settings screen. After two weeks you will know what the
    real mapping table looks like, and `reprojectAll()` will apply it to
    everything historic.
-3. **Confirm the deposit window**, then tick the services off.
-4. **Then Step 2.** The provider adapter is written and the templates are the
-   same ones already going out by copy-paste, so it is an environment variable
-   and a WhatsApp template approval — not a code change.
+3. **Connect a WhatsApp provider.** The adapter is written and the templates
+   are the same ones already going out by copy-paste, so it is an environment
+   variable and a WhatsApp template approval — not a code change. Setting
+   `WHATSAPP_PROVIDER` is also what brings the top-bar switch and the
+   Connections row back.
+4. **Connect SMTP**, so a parcel coming back reaches somebody who is not
+   looking at the screen. Until then every alert is a line in the logs that the
+   database records as sent.

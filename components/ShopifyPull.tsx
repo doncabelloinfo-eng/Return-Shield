@@ -2,7 +2,8 @@
 
 import { useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
-import { pullShopifyHistory, sweepPulledParcels } from '@/app/actions/shopify';
+import { pullShopifyHistory } from '@/app/actions/shopify';
+import { sweepNewParcels } from '@/app/actions/refresh';
 
 /**
  * "Pull the last 30 days" — how a store's history gets in, and how a new
@@ -56,7 +57,7 @@ export function ShopifyPull({
       if (r.added === 0) { setStep('done'); router.refresh(); return; }
 
       setStep('sweeping');
-      const swept = await sweepPulledParcels();
+      const swept = await sweepNewParcels();
       if (!swept.ok) {
         setError(`${swept.error} The parcels are in — the three-hourly sweep will pick them up.`);
       } else {

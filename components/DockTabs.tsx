@@ -90,7 +90,7 @@ export function DockTabs({ messages, feed }: { messages: DockMessage[]; feed: Do
                   <div className="m-auto rounded-lg bg-white/95 p-[18px] text-center">
                     <div className="text-[12.5px] font-semibold text-[#10203D]">Nothing has gone out yet</div>
                     <div className="mt-[5px] text-[11.5px] leading-[1.5] text-[#5A6478]">
-                      On Step 1 the system writes the message and you send it from your own
+                      The system writes the message and you send it from your own
                       WhatsApp — the Copy message button on every parcel.
                     </div>
                   </div>

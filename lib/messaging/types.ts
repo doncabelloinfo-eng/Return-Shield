@@ -11,10 +11,20 @@ export interface MessageContext {
   shippingCode: string;
   officeName: string | null;
   officeAddress: string | null;
+  /**
+   * The office's real opening hours, or null when Correos has not told us any.
+   *
+   * Null means the "Horario: …" sentence is left out altogether. It used to
+   * fall back to a hard-coded `L–V 08:30–20:30 · S 09:30–13:00`, and because
+   * Correos' events carry no office details at all today, every customer was
+   * being given opening times nobody had checked.
+   */
   officeHours: string | null;
-  /** The real last day, already worked out from product_rules. */
-  deadline: Date | null;
-  /** The customer's own page for this parcel, or null in Step 1. */
+  /** When Correos said it was at the counter. The one date they do give us. */
+  officeArrivedAt: Date | null;
+  /** How long it has been there, in Madrid days. Null when it is not there. */
+  daysAtOffice: number | null;
+  /** The customer's own page, or null when a person sends the message. */
   actionUrl: string | null;
   /**
    * The message will be pasted into Amazon's or TikTok's own chat rather than
@@ -32,8 +42,8 @@ export type MessageTemplate =
   | 'office_details'    // o15  — where it is, when it closes, what to show
   | 'office_reminder'   // o12  — still waiting
   | 'office_elsewhere'  // o8   — we can send it somewhere else
-  | 'office_four_days'  // o4   — four days left
-  | 'office_last_call'; // o2   — last warning
+  | 'office_four_days'  // o4   — it has been there a while
+  | 'office_last_call'; // o2   — last reminder
 
 export interface BuiltMessage {
   template: MessageTemplate;
@@ -56,13 +66,14 @@ export interface SendResult {
 /**
  * The only thing the rest of the codebase knows about WhatsApp.
  *
- * Step 1 is the `none` adapter: nothing is sent, the operator copies the text
- * the templates produced. Step 2 swaps in a real provider and the exact same
- * text goes out on its own. Nothing above this interface changes.
+ * The `none` adapter is the one in use: nothing is sent, the operator copies
+ * the text the templates produced. Connecting a real provider swaps it out and
+ * the exact same text goes out on its own. Nothing above this interface
+ * changes.
  */
 export interface MessageProvider {
   readonly name: string;
-  /** False in Step 1. The engine queues the message for a human instead. */
+  /** False with no provider connected. The engine queues it for a human. */
   readonly canSend: boolean;
   send(to: string, message: BuiltMessage, actionUrl: string | null): Promise<SendResult>;
 }

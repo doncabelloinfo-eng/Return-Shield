@@ -55,7 +55,9 @@ describe('a customer opening their link', () => {
     if (!r.ok) return;
     expect(r.view.stateEs).toBe('Te espera en la oficina de Correos');
     expect(r.view.officeName).toBe('Oficina Madrid Sucursal 12');
-    expect(r.view.daysLeft).toBe(15);
+    // Since when, not how long is left: Correos never tells us the last day.
+    expect(r.view.daysAtOffice).toBe(0);
+    expect(r.view.atOfficeSince).toBe('01 sep');
     expect(r.view.firstName).toBe('Lucía');
   });
 

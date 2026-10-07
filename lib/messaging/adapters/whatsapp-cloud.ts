@@ -1,7 +1,7 @@
 import type { BuiltMessage, MessageProvider, SendResult } from '../types';
 
 /**
- * Step 2. WhatsApp Cloud API.
+ * WhatsApp Cloud API. Not in use today — see lib/messaging/index.ts.
  *
  * Templates carry a URL button and never a quick-reply button: the number is
  * send-only, so a quick reply would be a trap that lets a customer think they

@@ -6,13 +6,13 @@ import {
   actionable, callQueue, isSnoozed, money, nextAction, priority, reason, tone,
   type DecidableShipment, type NextAction, type OpenTask, type Tone,
 } from '@/lib/escalation/decide';
-import { daysLeft, exact, human } from '@/lib/time';
+import { daysAtOffice, exact, human, shortDate } from '@/lib/time';
 import { now } from '@/lib/clock';
 import {
   emailLink, mapsLink, officeDetails, officeEmailSubject, telLink, whatsappLink,
-  DEFAULT_OFFICE_HOURS,
 } from '@/lib/messaging/build-message';
 import { customerLabel, isMarketplace, realFirstName } from '@/lib/orders/customer-label';
+import { shopifyOrderLink } from '@/lib/orders/shopify-link';
 import { firstName } from '@/lib/escalation/decide';
 import { displayPhone } from '@/lib/import/phone';
 
@@ -42,10 +42,17 @@ export interface ShipmentRow extends DecidableShipment {
   closeNote: string;
 
   /* --- worked out, so a screen never has to --- */
-  /** The big number: days left, or ↩ when it is already coming back. */
+  /**
+   * The big number: days at the post office, or ↩ when it is coming back.
+   *
+   * It used to be days LEFT, counted down from a last day worked out from a
+   * deposit window nobody had confirmed with Correos. Correos does not say
+   * when a parcel goes back, so the number counts up from the day they said it
+   * arrived — the one date they do give us.
+   */
   countdown: string;
   countdownTone: Tone;
-  /** "goes back this Thursday" / "last update yesterday". */
+  /** "At the office since 20 Sep · 8 days" / "last update yesterday". */
   when: string;
   /** The full timestamp, for the title attribute. */
   exactWhen: string;
@@ -56,7 +63,8 @@ export interface ShipmentRow extends DecidableShipment {
   /** "Top of the list: 2 days left · €148.50, cash on delivery." */
   topReason: string;
   snoozed: boolean;
-  daysLeftNumber: number | null;
+  /** Days at the post office, or null when it is not at one. */
+  daysAtOffice: number | null;
   telHref: string;
   waHref: string;
   mapsHref: string;
@@ -64,6 +72,12 @@ export interface ShipmentRow extends DecidableShipment {
   messageText: string;
   /** A `mailto:` with the same text, when the order has an email. */
   emailHref: string;
+  /**
+   * The order in the Shopify admin, or '' when it cannot be built — no shop
+   * domain, or an order that did not come from Shopify. Never a guess: see
+   * lib/orders/shopify-link.ts.
+   */
+  shopifyHref: string;
   lastContactLine: string;
 }
 
@@ -74,7 +88,7 @@ export async function loadRows(opts: { at?: Date } = {}): Promise<ShipmentRow[]>
     id: shipments.id,
     state: shipments.state,
     shippingCode: shipments.shippingCode,
-    officeDeadline: shipments.officeDeadline,
+    officeArrivedAt: shipments.officeArrivedAt,
     lastEventAt: shipments.lastEventAt,
     mutedUntil: shipments.mutedUntil,
     snoozeReason: shipments.snoozeReason,
@@ -95,6 +109,8 @@ export async function loadRows(opts: { at?: Date } = {}): Promise<ShipmentRow[]>
     postalCode: orders.postalCode,
     storeName: stores.name,
     storePlatform: stores.platform,
+    shopDomain: stores.shopDomain,
+    externalOrderId: orders.externalOrderId,
     officeName: offices.name,
     officeAddress: offices.address,
     officeHours: offices.openingHours,
@@ -124,7 +140,7 @@ export async function loadRows(opts: { at?: Date } = {}): Promise<ShipmentRow[]>
     const base: DecidableShipment = {
       id: r.id,
       state: r.state as ShipmentState,
-      officeDeadline: r.officeDeadline,
+      officeArrivedAt: r.officeArrivedAt,
       officeName: r.officeName,
       town: r.city ?? '',
       // The label, so every screen and every alert says something useful about
@@ -145,7 +161,7 @@ export async function loadRows(opts: { at?: Date } = {}): Promise<ShipmentRow[]>
     };
 
     const action = nextAction(base, at);
-    const d = daysLeft(r.officeDeadline, at);
+    const days = r.state === 'at_office' ? daysAtOffice(r.officeArrivedAt, at) : null;
     const snoozed = isSnoozed(base, at);
     const coming = r.state === 'returning' || r.state === 'refused' || r.state === 'returned';
 
@@ -165,8 +181,10 @@ export async function loadRows(opts: { at?: Date } = {}): Promise<ShipmentRow[]>
       shippingCode: r.shippingCode,
       officeName: r.officeName,
       officeAddress: r.officeAddress,
-      officeHours: r.officeHours ?? DEFAULT_OFFICE_HOURS,
-      deadline: r.officeDeadline,
+      // The office's real hours or nothing at all — never a hard-coded line.
+      officeHours: r.officeHours,
+      officeArrivedAt: r.officeArrivedAt,
+      daysAtOffice: daysAtOffice(r.officeArrivedAt, at),
       actionUrl: null,
     });
 
@@ -187,12 +205,16 @@ export async function loadRows(opts: { at?: Date } = {}): Promise<ShipmentRow[]>
       closeReason: r.closeReason,
       closeNote: r.closeNote ?? '',
 
-      countdown: coming ? '↩' : (d === null ? '–' : String(d)),
-      countdownTone: tone(base.state, r.officeDeadline, at),
-      when: r.officeDeadline && r.state === 'at_office'
-        ? human(r.officeDeadline, at)
+      countdown: coming ? '↩' : (days === null ? '–' : String(days)),
+      countdownTone: tone(base.state, r.officeArrivedAt, at),
+      // The fact, not a guess: the day Correos said it got there and how long
+      // ago that was. There is deliberately no "goes back on" date anywhere.
+      when: r.officeArrivedAt && r.state === 'at_office'
+        ? `At the office since ${shortDate(r.officeArrivedAt)} · ${days} ${days === 1 ? 'day' : 'days'}`
         : (r.lastEventAt ? `last update ${human(r.lastEventAt, at)}` : ''),
-      exactWhen: r.officeDeadline ? exact(r.officeDeadline) : (r.lastEventAt ? exact(r.lastEventAt) : ''),
+      exactWhen: r.officeArrivedAt && r.state === 'at_office'
+        ? exact(r.officeArrivedAt)
+        : (r.lastEventAt ? exact(r.lastEventAt) : ''),
       valueText: money(r.valueCents),
       action,
       why: snoozed
@@ -200,7 +222,7 @@ export async function loadRows(opts: { at?: Date } = {}): Promise<ShipmentRow[]>
         : (action ? action.why : 'Nothing to do'),
       topReason: reason(base, at),
       snoozed,
-      daysLeftNumber: d,
+      daysAtOffice: days,
       telHref: r.phoneE164 ? telLink(r.phoneE164) : '',
       waHref: r.phoneE164 ? whatsappLink(r.phoneE164, messageText) : '',
       mapsHref: mapsLink(r.officeName, r.officeAddress),
@@ -208,6 +230,7 @@ export async function loadRows(opts: { at?: Date } = {}): Promise<ShipmentRow[]>
       emailHref: r.email
         ? emailLink(r.email, officeEmailSubject(r.orderNumber), messageText)
         : '',
+      shopifyHref: shopifyOrderLink(r.storePlatform, r.shopDomain, r.externalOrderId) ?? '',
       lastContactLine: last
         ? `Last time: ${last.outcome} ${human(last.at, at)}${last.note ? ` — "${last.note}"` : ''}`
         : 'Never contacted',
@@ -259,7 +282,7 @@ export async function todayView(focusIndex = 0, at: Date = now()): Promise<Today
   const digest: string[] = [];
   if (calls.length) {
     const names = calls.slice(0, 3).map((s) =>
-      `${firstName(s.customerName)} (${s.daysLeftNumber !== null ? `${s.daysLeftNumber} days left, ` : ''}`
+      `${firstName(s.customerName)} (${s.daysAtOffice !== null ? `${s.daysAtOffice} days at the office, ` : ''}`
       + `${s.valueText}${s.paymentMethod === 'cod' ? ' cash on delivery' : ''})`).join(', ');
     digest.push(
       `${calls.length} ${calls.length === 1 ? 'call' : 'calls'}: ${names}`
@@ -309,7 +332,10 @@ export async function officeView(at: Date = now()): Promise<ShipmentRow[]> {
   const all = await loadRows({ at });
   return all
     .filter((r) => r.state === 'at_office' && !r.dropped)
-    .sort((a, b) => (a.daysLeftNumber ?? 999) - (b.daysLeftNumber ?? 999));
+    // Longest at the office first. That used to be "fewest days left", which
+    // is the same ordering read off a guessed deadline; this one is read off
+    // the day Correos said the parcel arrived.
+    .sort((a, b) => (b.daysAtOffice ?? -1) - (a.daysAtOffice ?? -1));
 }
 
 export async function callsView(at: Date = now()): Promise<ShipmentRow[]> {

@@ -6,6 +6,9 @@ import { agoInWords, exact } from '@/lib/time';
 import { isDemoMode } from '@/lib/demo-clock';
 import { JOB_NAMES, type JobName } from '@/jobs/definitions';
 
+/** The jobs that are actually on the schedule. See `JOB_CADENCE`. */
+type ScheduledJobName = typeof JOB_NAMES[number];
+
 /**
  * Is the engine running?
  *
@@ -75,7 +78,7 @@ export const engineHealth = perRequest(async (at: Date = now()): Promise<EngineH
 /* -------------------------------------------------------------------------- */
 
 export interface JobHealth {
-  job: JobName;
+  job: ScheduledJobName;
   /** How often it is meant to run, for the screen. */
   cadence: string;
   /** The last run that finished, skip or not. Proof the scheduler fired. */
@@ -95,12 +98,15 @@ export interface JobHealth {
  *
  * Written down twice — here and in vercel.json — which is a real cost, so the
  * test suite asserts the two agree rather than trusting anyone to remember.
+ *
+ * Keyed on the SCHEDULED jobs, not on `JobName`: `push-drain` and
+ * `push-heartbeat` still exist and are deliberately off the schedule, so
+ * giving them a cadence here would put them back on this screen claiming to
+ * run every five minutes when nothing runs them at all.
  */
-export const JOB_CADENCE: Record<JobName, string> = {
+export const JOB_CADENCE: Record<ScheduledJobName, string> = {
   'escalation-tick': 'every 30 minutes',
   reconcile: 'every 3 hours',
-  'push-drain': 'every 5 minutes',
-  'push-heartbeat': 'hourly',
   'shopify-backfill': 'hourly',
   'stale-detector': 'hourly, does the work once a day from 07:30 Madrid',
   'daily-digest': 'hourly, does the work once a day from 08:00 Madrid',
@@ -186,4 +192,48 @@ export const jobHealth = perRequest(async (at: Date = now()): Promise<JobHealth[
       failingSinceAgo: failing ? agoInWords(failing, at) : null,
     };
   });
+});
+
+/* -------------------------------------------------------------------------- */
+
+export interface SweepStatus {
+  /** The last reconcile run that finished, cron or by hand. */
+  lastAt: Date | null;
+  /** "12 minutes ago", or null if Correos has never been asked. */
+  ago: string | null;
+  exactWhen: string | null;
+  /** The last run somebody started with the Refresh button. For the guard. */
+  lastManualAt: Date | null;
+}
+
+/**
+ * When Correos was last asked, for the Refresh button's "Last checked …".
+ *
+ * A manual sweep is an ordinary `job_runs` row for the `reconcile` job with
+ * `manual: true` in its detail, rather than a timestamp of its own in the
+ * settings table. That is deliberate: the button and the cron are the same
+ * sweep, so they belong in the same history — the Scheduled jobs panel, the
+ * engine-health heartbeat and this function all see a manual run without
+ * anything having to be taught about it.
+ *
+ * A skipped run counts here as it does everywhere else: it proves the sweep
+ * reached the end, which is what "last checked" is answering.
+ */
+export const sweepStatus = perRequest(async (at: Date = now()): Promise<SweepStatus> => {
+  const rows = await getDb().execute(raw`
+    SELECT max(started_at)                                                   AS last_at,
+           max(started_at) FILTER (WHERE detail->>'manual' = 'true')          AS last_manual_at
+      FROM job_runs
+     WHERE job = 'reconcile' AND ok IS TRUE
+  `);
+
+  const row = rowsOf<{ last_at: string | null; last_manual_at: string | null }>(rows)[0];
+  const lastAt = row?.last_at ? new Date(row.last_at) : null;
+
+  return {
+    lastAt,
+    ago: lastAt ? agoInWords(lastAt, at) : null,
+    exactWhen: lastAt ? exact(lastAt) : null,
+    lastManualAt: row?.last_manual_at ? new Date(row.last_manual_at) : null,
+  };
 });

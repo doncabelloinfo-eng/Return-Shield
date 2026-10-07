@@ -4,7 +4,7 @@ import { notifications, offices, orders, shipments, stores } from '@/db/schema';
 import { verifyActionToken } from '@/lib/action-token';
 import { SAVED_STATES, type ShipmentState } from '@/lib/state-machine/states';
 import { now } from '@/lib/clock';
-import { daysLeft } from '@/lib/time';
+import { daysAtOffice, shortDateEs } from '@/lib/time';
 
 /**
  * Everything behind a /e/{token} link, and the rules about when it stops
@@ -25,7 +25,17 @@ export interface CustomerView {
   officeName: string | null;
   officeAddress: string | null;
   officeHours: string | null;
-  daysLeft: number | null;
+  /**
+   * "20 sep" — the day Correos said the parcel reached the counter, in
+   * Spanish, or null when it is not at one.
+   *
+   * This replaced a days-left countdown. The countdown came from a deposit
+   * window nobody had confirmed with Correos, which made this page — the one
+   * screen a customer ever sees — state a return date we had invented.
+   */
+  atOfficeSince: string | null;
+  /** How long it has been there, in Madrid days. */
+  daysAtOffice: number | null;
   firstName: string;
 }
 
@@ -53,7 +63,7 @@ export async function resolveToken(token: string): Promise<
     shipmentId: shipments.id,
     state: shipments.state,
     shippingCode: shipments.shippingCode,
-    officeDeadline: shipments.officeDeadline,
+    officeArrivedAt: shipments.officeArrivedAt,
     orderNumber: orders.orderNumber,
     customerName: orders.customerName,
     storeName: stores.name,
@@ -89,7 +99,9 @@ export async function resolveToken(token: string): Promise<
       officeName: row.officeName,
       officeAddress: row.officeAddress,
       officeHours: row.officeHours,
-      daysLeft: daysLeft(row.officeDeadline),
+      atOfficeSince: state === 'at_office' && row.officeArrivedAt
+        ? shortDateEs(row.officeArrivedAt) : null,
+      daysAtOffice: state === 'at_office' ? daysAtOffice(row.officeArrivedAt) : null,
       firstName: row.customerName.trim().split(/\s+/)[0] ?? '',
     },
   };

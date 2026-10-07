@@ -20,11 +20,15 @@ export function FocusCard({ row, nextIndex, total }: { row: ShipmentRow; nextInd
     >
       <div className="flex flex-wrap items-start gap-[26px]">
         <div className="min-w-[120px] flex-none">
-          <div className="text-[10px] font-semibold uppercase tracking-[.08em] text-muted">Deadline</div>
+          {/* Days at the post office, counting up from the day Correos said it
+              got there — not down to a last day they never gave us. */}
+          <div className="text-[10px] font-semibold uppercase tracking-[.08em] text-muted">
+            {row.state === 'at_office' ? 'Days at the office' : 'Where it is'}
+          </div>
           <HeroNumber value={row.countdown} tone={row.countdownTone} size={72} />
           <div className="text-[12.5px] font-medium text-muted" title={row.exactWhen}>
-            {row.officeDeadline && row.state === 'at_office'
-              ? `goes back ${row.when}`
+            {row.state === 'at_office' && row.when
+              ? row.when
               : (STATE_LABEL[row.state] ?? row.state)}
           </div>
         </div>
@@ -37,9 +41,12 @@ export function FocusCard({ row, nextIndex, total }: { row: ShipmentRow; nextInd
           <div className="mt-[6px] text-[13px] leading-[1.5] text-muted">
             {row.orderNumber} · {row.storeName} · {row.valueText}
             <br />
+            {/* Only when Correos named an office. Their events carry none
+                today, and a maps link that searches for nothing is worse than
+                no link. */}
             {row.officeName && (
               <a href={row.mapsHref} target="_blank" rel="noreferrer" className="border-b border-line text-ink">
-                {row.officeName} · {row.officeAddress}
+                {[row.officeName, row.officeAddress].filter(Boolean).join(' · ')}
               </a>
             )}
           </div>

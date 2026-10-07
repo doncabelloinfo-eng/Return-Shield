@@ -233,7 +233,7 @@ describe('the reconcile sweep', () => {
 
     const [row] = await getDb().select().from(shipments);
     expect(row.state).toBe('at_office');
-    expect(row.officeDeadline).not.toBeNull();
+    expect(row.officeArrivedAt).not.toBeNull();
   });
 
   it('re-reading the same events recovers nothing the second time', async () => {

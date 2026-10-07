@@ -9,8 +9,8 @@ export * from './build-message';
 let cached: MessageProvider | null = null;
 
 /**
- * Which step we are on is an environment variable, not a code change.
- * Nothing outside this file knows which adapter it got.
+ * Whether messages send themselves is an environment variable, not a code
+ * change. Nothing outside this file knows which adapter it got.
  */
 export function messageProvider(): MessageProvider {
   if (cached) return cached;
@@ -29,10 +29,10 @@ export function messageProvider(): MessageProvider {
 
     if (!apiUrl || !token || !phoneNumberId) {
       // Half-configured is not a reason to take the escalation engine down.
-      // Falling back to Step 1 means every message is still written at exactly
-      // the right moment and put in front of an operator — the parcels keep
-      // being chased, by hand, until somebody sets the rest of the variables.
-      // The Settings screen says so in as many words.
+      // Falling back to the no-op provider means every message is still
+      // written at exactly the right moment and put in front of an operator —
+      // the parcels keep being chased, by hand, until somebody sets the rest
+      // of the variables. The Settings screen says so in as many words.
       warnOnce(
         'WHATSAPP_PROVIDER is "whatsapp-cloud" but WHATSAPP_API_URL / _TOKEN / '
         + '_PHONE_NUMBER_ID are not all set. Messages will be written for an operator '
@@ -49,7 +49,7 @@ export function messageProvider(): MessageProvider {
   // An unrecognised provider is a typo in an environment variable. Falling back
   // to writing messages by hand is wrong in a small way; refusing to escalate
   // anything at all is wrong in a large one.
-  warnOnce(`Unknown WHATSAPP_PROVIDER "${kind}" — falling back to Step 1.`);
+  warnOnce(`Unknown WHATSAPP_PROVIDER "${kind}" — messages will be written for an operator to send.`);
   cached = new NoProvider();
   return cached;
 }

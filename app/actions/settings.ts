@@ -2,51 +2,28 @@
 
 import { revalidatePath } from 'next/cache';
 import { cookies } from 'next/headers';
-import { eq } from 'drizzle-orm';
-import { getDb } from '@/db';
-import { productRules } from '@/db/schema';
-import { requireUser } from '@/lib/auth/guard';
-import { recalculateDeadlines } from '@/lib/shipments/repo';
-import { setSetting } from '@/lib/settings';
-import { say } from '@/lib/activity';
-import { now } from '@/lib/clock';
 
 /**
- * The deposit window. Change it and every deadline, countdown and reminder is
- * worked out again straight away — including the ones that are now in the past,
- * which is exactly what happens in real life when Correos changes how long
- * they hold things.
+ * What is left of the Settings actions.
+ *
+ * There were three more, and all three are gone because what they changed was
+ * never real:
+ *
+ * `setDepositDays` and `markDepositConfirmed` edited "how long the post office
+ * waits" per Correos service — a number that started at 15, was labelled
+ * "still a guess", and was the basis of every deadline, countdown and "goes
+ * back on" date in the system, including the dates in customers' messages.
+ * Correos does not publish it, does not send it, and announces the return
+ * itself when it happens. So the window is gone rather than editable, the
+ * `product_rules` rows are left in place unread, and nothing invents a date.
+ *
+ * `setPhase` flipped the Step 1 / Step 2 switch in the top bar. Step 2 needs a
+ * WhatsApp provider that can send, and `WHATSAPP_PROVIDER` is `none`, so the
+ * switch changed a stored number and nothing else — it was pressed several
+ * times on 7 October to see what it did, and it did nothing. The code path is
+ * still there in `lib/escalation/run.ts` for when a provider is connected; the
+ * control is not.
  */
-export async function setDepositDays(productCode: string, days: number) {
-  await requireUser();
-  const clamped = Math.max(1, Math.min(30, Math.round(days)));
-
-  await getDb().update(productRules)
-    .set({ depositDays: clamped, updatedAt: now() })
-    .where(eq(productRules.productCode, productCode));
-
-  const moved = await recalculateDeadlines(productCode);
-  await say(`Waiting time for ${productCode} changed to ${clamped} days — ${moved} parcels worked out again`);
-  revalidatePath('/', 'layout');
-}
-
-export async function markDepositConfirmed(productCode: string, confirmed: boolean) {
-  await requireUser();
-  await getDb().update(productRules)
-    .set({ confirmedWithCarrier: confirmed, updatedAt: now() })
-    .where(eq(productRules.productCode, productCode));
-  revalidatePath('/', 'layout');
-}
-
-/** Step 1 writes the messages; Step 2 sends them. */
-export async function setPhase(phase: 1 | 2) {
-  await requireUser();
-  await setSetting('phase', phase);
-  await say(phase === 1
-    ? 'Back to Step 1 — the system writes the messages, you send them'
-    : 'Now on Step 2 — the system sends the messages itself and only calls you in if nobody replies');
-  revalidatePath('/', 'layout');
-}
 
 export async function toggleTheme(next: 'light' | 'dark') {
   cookies().set('rs_theme', next, { path: '/', maxAge: 60 * 60 * 24 * 365, sameSite: 'lax' });

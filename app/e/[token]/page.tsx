@@ -40,19 +40,32 @@ export default async function CustomerPage({
           </div>
           <h1 className="mt-[6px] text-[19px] font-bold leading-tight">{v.stateEs}</h1>
 
+          {/*
+            The number counts UP from the day Correos said the parcel reached
+            the counter, not down to a last day — because nobody told us the
+            last day. It used to count down from a deposit window an operator
+            had typed into Settings and marked "still a guess", which meant
+            this page, the only screen a customer ever sees, named a return
+            date we had invented.
+          */}
           <div className="mt-3 flex items-baseline gap-[9px]">
             <span
               className="text-[52px] font-extrabold leading-[.9] [font-variant-numeric:tabular-nums]"
               style={{
-                color: v.daysLeft === null ? '#111826'
-                  : v.daysLeft <= 3 ? '#B3261E' : v.daysLeft <= 7 ? '#C2410C' : '#111826',
+                color: v.daysAtOffice === null ? '#111826'
+                  : v.daysAtOffice >= 11 ? '#B3261E' : v.daysAtOffice >= 7 ? '#C2410C' : '#111826',
               }}
             >
-              {v.state === 'at_office' && v.daysLeft !== null ? Math.max(0, v.daysLeft) : '!'}
+              {v.state === 'at_office' && v.daysAtOffice !== null ? v.daysAtOffice : '!'}
             </span>
             <span className="text-[11.5px] font-medium leading-[1.4] text-[#5A6478]">
               {v.state === 'at_office'
-                ? 'días para recogerlo antes de que vuelva a origen'
+                ? <>
+                    {v.atOfficeSince
+                      ? <>En la oficina desde el {v.atOfficeSince}. </>
+                      : null}
+                    Recógelo cuanto antes: si no se recoge a tiempo, Correos lo devuelve.
+                  </>
                 : 'necesitamos que nos digas qué hacer'}
             </span>
           </div>

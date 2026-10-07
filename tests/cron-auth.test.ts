@@ -6,6 +6,7 @@ import { acquireJobLock } from '@/lib/job-lock';
 import { getDb } from '@/db';
 import { jobRuns } from '@/db/schema';
 import { TestClock, resetClock } from '@/lib/clock';
+import { JOB_NAMES, PAUSED_JOB_NAMES } from '@/jobs/definitions';
 import { resetDb, closeDb } from './helpers/db';
 
 // Imported by name rather than by a computed path, so adding a cron route
@@ -140,7 +141,18 @@ describe('every cron route', () => {
 });
 
 describe('the schedule in vercel.json', () => {
-  it('has an entry for every cron route, and no entry without one', () => {
+  /*
+   * Every cron route is either scheduled or deliberately paused, and nothing
+   * is scheduled that has no route.
+   *
+   * The two push jobs are the paused ones. Their routes, their receiver and
+   * their code are all intact — hitting one by hand still works — and they are
+   * off the schedule because push is not configured and is not being turned
+   * on, so between them they fired three hundred times a day to record "push
+   * not configured". This is the test that stops a route quietly falling off
+   * the schedule without somebody deciding it should.
+   */
+  it('schedules every cron route that is not deliberately paused', () => {
     const config = JSON.parse(readFileSync('vercel.json', 'utf8')) as {
       crons: { path: string; schedule: string }[];
     };
@@ -149,7 +161,11 @@ describe('the schedule in vercel.json', () => {
     const routes = readdirSync('app/api/cron', { withFileTypes: true })
       .filter((d) => d.isDirectory()).map((d) => d.name).sort();
 
-    expect(scheduled).toEqual(routes);
+    expect(scheduled).toEqual([...JOB_NAMES].sort());
+    expect(routes).toEqual([...JOB_NAMES, ...PAUSED_JOB_NAMES].sort());
+    for (const paused of PAUSED_JOB_NAMES) {
+      expect(scheduled).not.toContain(paused);
+    }
   });
 
   it('gives every job a five-field cron expression', () => {

@@ -6,14 +6,14 @@ import { say } from '@/lib/activity';
 import { getSettings } from '@/lib/settings';
 import { ladderInput } from '@/lib/shipments/repo';
 import { ingestEvent } from '@/lib/shipments/ingest';
-import { buildMessage, DEFAULT_OFFICE_HOURS, messageProvider } from '@/lib/messaging';
+import { buildMessage, messageProvider } from '@/lib/messaging';
 import type { MessageContext } from '@/lib/messaging/types';
 import { firstName, money } from './decide';
 import { dueRungs, nextSendingSlot, withinSendingHours, type DueRung } from './ladder';
 import { markFired, scheduleExtra } from './silence';
 import { openTask } from './tasks';
 import { mintActionToken } from '@/lib/action-token';
-import { daysLeft } from '@/lib/time';
+import { daysAtOffice } from '@/lib/time';
 import { envOr } from '@/lib/env';
 
 /**
@@ -97,7 +97,7 @@ async function fireRung(
   // not a message, so it is booked whatever the hour — an operator is not
   // woken by a task appearing on a list, and holding it back until nine on the
   // second-to-last day is exactly the delay that loses the parcel.
-  if (rung.id === 'o2') await bookLastWarningCall(shipmentId, ctx, result);
+  if (rung.id === 'o2') await bookLastWarningCall(shipmentId, ctx, result, at);
 
   switch (rung.effect.kind) {
     case 'message': {
@@ -105,7 +105,7 @@ async function fireRung(
       // is left unfired, so nothing is lost and nothing is sent at 04:00.
       if (!withinSendingHours(at)) return 'deferred';
       if (!await markFired(shipmentId, rung.id)) return 'fired';
-      await deliverMessage(shipmentId, rung, ctx, result);
+      await deliverMessage(shipmentId, rung, ctx, result, at);
       break;
     }
 
@@ -153,49 +153,27 @@ async function fireRung(
       break;
     }
 
-    case 'deadline_reached': {
-      if (!await markFired(shipmentId, rung.id)) return 'fired';
-      await say(
-        `${ctx.customerName} — time ran out at ${ctx.officeName ?? 'the post office'}, Correos should be sending it back`,
-        shipmentId,
-      );
-      // Same rule as above: the deposit window running out is our arithmetic,
-      // not Correos'. We flag it and tell somebody; we do not write a return
-      // event that never happened.
-      await openTask({
-        shipmentId,
-        type: 'chase_carrier',
-        reason: 'deposit_window_over',
-        label: 'The post office should have sent this back — confirm with Correos',
-      });
-      result.tasksOpened += 1;
-      const { raiseAlert } = await import('@/lib/alerts');
-      await raiseAlert({
-        // Keyed on the parcel and the deadline it ran out of, so a re-run says
-        // nothing and a genuinely new deadline (the window was extended, the
-        // parcel went back to an office) is a new alert.
-        dedupeKey: `deadline-reached:${shipmentId}:${ctx.officeDeadline?.toISOString() ?? 'none'}`,
-        shipmentId,
-        subject: `About to be returned: ${ctx.orderNumber} · ${ctx.customerName} · ${money(ctx.valueCents)}`,
-        lines: [
-          `${ctx.orderNumber} has run out of time at ${ctx.officeName ?? 'the post office'}.`,
-          '',
-          `Customer: ${ctx.customerName}`,
-          `Value:    ${money(ctx.valueCents)} (${ctx.paymentMethod === 'cod' ? 'cash on delivery' : 'prepaid'})`,
-          `Tracking: ${ctx.shippingCode}`,
-        ],
-      });
-      break;
-    }
+    /*
+     * There is no `deadline_reached` branch any more, and nothing replaces it.
+     *
+     * It fired when our own arithmetic said the deposit window was up, and
+     * raised an alert and a "confirm with Correos" task on the strength of it.
+     * The arithmetic was a guessed fifteen days, so on a service Correos holds
+     * for longer it was an alarm about nothing, and on a shorter one it was
+     * late. Correos announce the return themselves — "Finalizado plazo
+     * retirada" — and that event raises the real alert through
+     * `notifyReturnStarted`, with the date they actually acted on.
+     */
   }
 
   return 'fired';
 }
 
 async function bookLastWarningCall(
-  shipmentId: string, ctx: MessageContextRow, result: TickResult,
+  shipmentId: string, ctx: MessageContextRow, result: TickResult, at: Date,
 ): Promise<void> {
   const cod = ctx.paymentMethod === 'cod';
+  const days = daysAtOffice(ctx.officeArrivedAt, at);
 
   const opened = await openTask({
     shipmentId,
@@ -211,8 +189,11 @@ async function bookLastWarningCall(
   if (opened === 'opened') {
     result.tasksOpened += 1;
     await say(
-      `${ctx.customerName} — 2 days left${cod ? ` on ${money(ctx.valueCents)} cash on delivery` : ''}`
-      + ', last warning and a call you cannot skip',
+      // How long it has been there, not how long is left: nobody told us how
+      // long is left.
+      `${ctx.customerName} — ${days ?? 0} days at the post office`
+      + `${cod ? ` on ${money(ctx.valueCents)} cash on delivery` : ''}`
+      + ', last reminder and a call you cannot skip',
       shipmentId,
     );
   }
@@ -244,20 +225,30 @@ function callTaskLine(rung: DueRung, ctx: MessageContextRow): string {
 /**
  * Write the message, then either send it or put it in front of a person.
  *
- * Step 1 and Step 2 run the exact same ladder and produce the exact same text.
- * The only difference is the last line of this function.
+ * Both run the exact same ladder and produce the exact same text; the only
+ * difference is the last line of this function. Today it is always the first
+ * of the two, because no WhatsApp provider is connected — see
+ * `messageProvider()` and the note on `settings.phase`.
  */
 async function deliverMessage(
   shipmentId: string,
   rung: DueRung,
   ctx: MessageContextRow,
   result: TickResult,
+  at: Date,
 ): Promise<void> {
   if (rung.effect.kind !== 'message') return;
 
   const settings = await getSettings();
   const provider = messageProvider();
-  const step2 = settings.phase === 2 && provider.canSend;
+  /*
+   * BOTH conditions, and the provider is the one that decides today.
+   * `settings.phase` is still stored and no longer settable from any screen —
+   * the switch that used to flip it needed a provider behind it to mean
+   * anything, and `WHATSAPP_PROVIDER` is `none`. So whatever the stored number
+   * says, this is false and every message is written for a person to send.
+   */
+  const sendsItself = settings.phase === 2 && provider.canSend;
 
   const token = mintActionToken(shipmentId);
   const actionUrl = `${appUrl()}/e/${token}`;
@@ -269,9 +260,12 @@ async function deliverMessage(
     shippingCode: ctx.shippingCode,
     officeName: ctx.officeName,
     officeAddress: ctx.officeAddress,
-    officeHours: ctx.officeHours ?? DEFAULT_OFFICE_HOURS,
-    deadline: ctx.officeDeadline,
-    actionUrl: step2 ? actionUrl : null,
+    // No default hours. A line of opening times nobody checked, sent to a
+    // customer who then turns up to a closed door, is worse than no line.
+    officeHours: ctx.officeHours,
+    officeArrivedAt: ctx.officeArrivedAt,
+    daysAtOffice: daysAtOffice(ctx.officeArrivedAt, at),
+    actionUrl: sendsItself ? actionUrl : null,
   } satisfies MessageContext);
 
   const [row] = await getDb().insert(notifications).values({
@@ -302,17 +296,17 @@ async function deliverMessage(
 
   result.messagesWritten += 1;
 
-  if (!step2) {
-    // Step 1: the system has written it, a person sends it.
+  if (!sendsItself) {
+    // No provider that can send: the system has written it, a person sends it.
     await openTask({
       shipmentId,
       type: 'contact',
       reason: rung.effect.template,
-      label: ctx.officeDeadline ? 'Send the office details' : 'Get in touch, nobody was home',
+      label: ctx.officeArrivedAt ? 'Send the office details' : 'Get in touch, nobody was home',
     });
     result.tasksOpened += 1;
     await say(
-      `${ctx.customerName} — message written for you, ready to copy (Step 1 sends nothing by itself)`,
+      `${ctx.customerName} — message written for you, ready to copy`,
       shipmentId,
     );
     return;
@@ -368,7 +362,7 @@ interface MessageContextRow {
   officeName: string | null;
   officeAddress: string | null;
   officeHours: string | null;
-  officeDeadline: Date | null;
+  officeArrivedAt: Date | null;
   phoneE164: string | null;
   phoneStatus: string;
   valueCents: number;
@@ -384,7 +378,7 @@ async function messageContextFor(shipmentId: string): Promise<MessageContextRow 
     officeName: offices.name,
     officeAddress: offices.address,
     officeHours: offices.openingHours,
-    officeDeadline: shipments.officeDeadline,
+    officeArrivedAt: shipments.officeArrivedAt,
     phoneE164: orders.phoneE164,
     phoneStatus: orders.phoneStatus,
     valueCents: orders.totalValueCents,

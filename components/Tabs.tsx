@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { RefreshButton } from './RefreshButton';
 
 const TABS = [
   { href: '/today', label: 'Today' },
@@ -12,7 +13,11 @@ const TABS = [
   { href: '/settings', label: 'Settings' },
 ];
 
-export function Tabs() {
+export function Tabs({ lastChecked = null, lastCheckedExact = null }: {
+  /** "12 minutes ago", for the Refresh button beside the tabs. */
+  lastChecked?: string | null;
+  lastCheckedExact?: string | null;
+} = {}) {
   const path = usePathname();
   return (
     <nav className="flex flex-wrap items-center gap-[6px] px-4 pt-3">
@@ -38,6 +43,10 @@ export function Tabs() {
           Parcel
         </span>
       )}
+
+      {/* In the menu rather than on one screen: the question is asked from
+          everywhere and the answer changes every screen at once. */}
+      <RefreshButton lastChecked={lastChecked} exactWhen={lastCheckedExact} />
     </nav>
   );
 }

@@ -1,7 +1,7 @@
 import { and, eq, inArray, isNull, notInArray } from 'drizzle-orm';
 import { getDb } from '@/db';
 import {
-  escalationExtras, escalationFires, offices, orders, productRules,
+  escalationExtras, escalationFires, offices, orders,
   shipmentEvents, shipments, tasks,
 } from '@/db/schema';
 import { project, type ProjectableEvent, type Projection } from '@/lib/state-machine/project';
@@ -13,27 +13,6 @@ import { getSetting } from '@/lib/settings';
  * Reading and rebuilding a shipment. Everything derived lives in one place so
  * there is exactly one answer to "what state is this parcel in".
  */
-
-/** How long the office holds this product. Never falls back to 15 silently. */
-export async function depositDaysFor(productCode: string): Promise<number> {
-  const [rule] = await getDb().select().from(productRules)
-    .where(eq(productRules.productCode, productCode)).limit(1);
-
-  if (rule) return rule.depositDays;
-
-  // An unknown product code is a configuration gap, not a reason to guess. We
-  // create the rule with the working assumption and flag it as unconfirmed so
-  // it shows up on the Settings screen asking to be checked with Correos.
-  const [fallback] = await getDb().select().from(productRules)
-    .where(eq(productRules.productCode, '*')).limit(1);
-  const days = fallback?.depositDays ?? 15;
-
-  await getDb().insert(productRules)
-    .values({ productCode, depositDays: days, label: 'Added automatically — never confirmed with Correos', confirmedWithCarrier: false })
-    .onConflictDoNothing();
-
-  return days;
-}
 
 export async function eventsFor(shipmentId: string): Promise<ProjectableEvent[]> {
   const rows = await getDb().select({
@@ -51,7 +30,7 @@ export async function eventsFor(shipmentId: string): Promise<ProjectableEvent[]>
 /**
  * Recompute the shipments row from its events and write it back.
  *
- * This is the only function allowed to set `state`, `office_deadline` and
+ * This is the only function allowed to set `state`, `office_arrived_at` and
  * friends. Everything else reads them. That is what makes "fix the normaliser
  * and replay" a real option rather than a hope.
  */
@@ -59,8 +38,7 @@ export async function reproject(shipmentId: string): Promise<Projection> {
   const [ship] = await getDb().select().from(shipments).where(eq(shipments.id, shipmentId)).limit(1);
   if (!ship) throw new Error(`reproject: no shipment ${shipmentId}`);
 
-  const depositDays = await depositDaysFor(ship.productCode);
-  const p = project(await eventsFor(shipmentId), { depositDays });
+  const p = project(await eventsFor(shipmentId));
 
   let officeId = ship.officeId;
   if (p.officeCode) {
@@ -73,7 +51,11 @@ export async function reproject(shipmentId: string): Promise<Projection> {
     state: p.state,
     stateSince: p.stateSince,
     officeArrivedAt: p.officeArrivedAt,
-    officeDeadline: p.officeDeadline,
+    // Always null now. The column stays — every parcel in the live database
+    // has one, and dropping it would need a migration run in the right order
+    // against a fork somebody has to click Sync on — but nothing computes it
+    // and nothing reads it. See the note in lib/state-machine/project.ts.
+    officeDeadline: null,
     failedAt: p.failedAt,
     lastEventAt: p.lastEventAt,
     officeId,
@@ -90,17 +72,6 @@ export async function reproject(shipmentId: string): Promise<Projection> {
 /** Rebuild every shipment. Used after a normaliser fix. */
 export async function reprojectAll(): Promise<number> {
   const rows = await getDb().select({ id: shipments.id }).from(shipments);
-  for (const r of rows) await reproject(r.id);
-  return rows.length;
-}
-
-/** Deposit days changed: every live deadline is now a different day. */
-export async function recalculateDeadlines(productCode?: string): Promise<number> {
-  const rows = await getDb().select({ id: shipments.id }).from(shipments).where(
-    productCode
-      ? and(eq(shipments.productCode, productCode), isNull(shipments.droppedAt))
-      : isNull(shipments.droppedAt),
-  );
   for (const r of rows) await reproject(r.id);
   return rows.length;
 }
@@ -122,7 +93,6 @@ export async function ladderInput(shipmentId: string): Promise<LadderInput> {
     state: ship.state as ShipmentState,
     failedAt: ship.failedAt,
     officeArrivedAt: ship.officeArrivedAt,
-    officeDeadline: ship.officeDeadline,
     lastEventAt: ship.lastEventAt,
     fired: new Set(fires.map((f) => f.rungId)),
     extras: extras.map((e) => ({ rungId: e.rungId, kind: e.kind as ExtraKind, dueAt: e.dueAt })),

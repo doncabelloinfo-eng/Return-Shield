@@ -54,7 +54,7 @@ export async function testCorreosConnection(shippingCode: string): Promise<Corre
 
   const storedMode = await getSetting('correosBatchMode');
 
-  /* --- Step 1: can we get a token at all? ------------------------------- */
+  /* --- Part 1: can we get a token at all? ------------------------------- */
 
   const tokens = correosToken();
   if (!tokens.configured) {
@@ -97,7 +97,7 @@ export async function testCorreosConnection(shippingCode: string): Promise<Corre
     return { token: tokenCheck, batchMode: storedMode, batchNote: null };
   }
 
-  /* --- Step 2: does a real lookup work? --------------------------------- */
+  /* --- Part 2: does a real lookup work? --------------------------------- */
 
   // A client of its own, so a test cannot change what the sweep believes about
   // the batch format — and so the test is not answered from a warm instance's

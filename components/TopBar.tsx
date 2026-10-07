@@ -2,28 +2,37 @@
 
 import { useRouter } from 'next/navigation';
 import { useTransition } from 'react';
-import { setPhase, toggleTheme } from '@/app/actions/settings';
+import { toggleTheme } from '@/app/actions/settings';
 import { advanceDemoClock, resetDemo } from '@/app/actions/demo';
 
 /**
- * The bar across the top. Left to right: who we are, what time it is, which
- * step we are on, and how much is owed today.
+ * The bar across the top. Left to right: who we are, what time it is, and how
+ * much is owed today.
+ *
+ * There was a "Step 1 — just for us / Step 2 — we message customers" switch
+ * here, and it is gone because it did nothing. Step 2 needs a WhatsApp
+ * provider that can send, `WHATSAPP_PROVIDER` is `none`, and the engine checks
+ * both — so flipping the switch wrote a number to the settings table and
+ * changed no behaviour whatsoever. It was pressed several times on 7 October
+ * to find out what it did. A control that does nothing makes it impossible to
+ * see how far the system actually goes, which is the one thing this screen is
+ * for. The code path is intact in lib/escalation/run.ts; the switch comes back
+ * when there is a provider behind it.
  *
  * The clock controls only exist in demo mode. In production the time is the
  * time, and the little "+1 day" button that made the prototype demonstrable
- * would be a way to fire fifteen days of reminders at real customers.
+ * would be a way to fire a fortnight of reminders at real customers.
  */
 
 export interface TopBarProps {
   dateLabel: string;
-  phase: 1 | 2;
   todoCount: number;
   theme: 'light' | 'dark';
   demo: boolean;
   userName: string;
 }
 
-export function TopBar({ dateLabel, phase, todoCount, theme, demo, userName }: TopBarProps) {
+export function TopBar({ dateLabel, todoCount, theme, demo, userName }: TopBarProps) {
   const [pending, start] = useTransition();
   const router = useRouter();
 
@@ -52,17 +61,6 @@ export function TopBar({ dateLabel, phase, todoCount, theme, demo, userName }: T
             </button>
           </>
         )}
-      </div>
-
-      <div className="flex items-center overflow-hidden rounded-md border border-white/20">
-        <button type="button" disabled={pending} onClick={run(() => setPhase(1))}
-          className={`whitespace-nowrap px-[11px] py-2 text-[11.5px] font-bold ${phase === 1 ? 'bg-accent text-navy' : 'text-white'}`}>
-          Step 1 — just for us
-        </button>
-        <button type="button" disabled={pending} onClick={run(() => setPhase(2))}
-          className={`whitespace-nowrap border-l border-white/20 px-[11px] py-2 text-[11.5px] font-bold ${phase === 2 ? 'bg-accent text-navy' : 'text-white'}`}>
-          Step 2 — we message customers
-        </button>
       </div>
 
       <div className="ml-auto flex items-center gap-[7px]">

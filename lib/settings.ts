@@ -12,7 +12,14 @@ import { settings } from '@/db/schema';
  */
 
 export interface AppSettings {
-  /** Step 1 writes messages for a person; Step 2 sends them itself. */
+  /**
+   * 1 = messages are written for a person to send; 2 = they send themselves.
+   *
+   * Still stored, still read by `lib/escalation/run.ts`, and no longer
+   * settable from any screen: sending itself also needs a WhatsApp provider
+   * that can send, and there is none, so the switch that used to flip this
+   * changed a number and nothing else. See app/actions/settings.ts.
+   */
   phase: 1 | 2;
   /** How long Correos may say nothing before we ask where the parcel is. */
   staleAfterHours: number;

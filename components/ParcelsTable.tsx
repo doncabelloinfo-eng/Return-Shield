@@ -26,7 +26,6 @@ export function ParcelsTable({ rows, empty }: { rows: ParcelListRow[]; empty: Re
             <Th>In this status</Th>
             <Th>Ordered</Th>
             <Th>Shipped</Th>
-            <Th>Goes back</Th>
             <Th align="right">Value</Th>
             <Th>Phone</Th>
             <Th>Town</Th>
@@ -72,7 +71,24 @@ export function ParcelsTable({ rows, empty }: { rows: ParcelListRow[]; empty: Re
 
               <td className="whitespace-nowrap border-b border-line px-3 py-[10px]">
                 <Bilingual en={r.status.en} es={r.status.es} size={12} />
-                <div className="mt-[3px] text-[11.5px] text-muted">{r.inStatus}</div>
+                {/*
+                  For a parcel at a post office, how long it has been there and
+                  since when — the one date Correos gives us. The "Goes back"
+                  column that used to sit further along this row is gone: it
+                  was worked out from a deposit window nobody had confirmed,
+                  and a parcel Correos IS sending back now appears under
+                  "Coming back" with their own date on it.
+                */}
+                {r.atOffice
+                  ? (
+                    <div
+                      className={`mt-[3px] text-[11.5px] ${r.atOffice.late ? 'font-semibold text-crit' : 'text-muted'}`}
+                      title={r.atOffice.sinceExact}
+                    >
+                      since {r.atOffice.since} · {r.atOffice.days} {r.atOffice.days === 1 ? 'day' : 'days'}
+                    </div>
+                  )
+                  : <div className="mt-[3px] text-[11.5px] text-muted">{r.inStatus}</div>}
               </td>
 
               <td className="whitespace-nowrap border-b border-line px-3 py-[10px] text-[12.5px]">
@@ -87,12 +103,6 @@ export function ParcelsTable({ rows, empty }: { rows: ParcelListRow[]; empty: Re
               <td className="whitespace-nowrap border-b border-line px-3 py-[10px] text-[12.5px] text-ink"
                 title={r.shippedExact}>
                 {r.shippedOn}
-              </td>
-
-              <td className="whitespace-nowrap border-b border-line px-3 py-[10px] text-[12.5px]">
-                {r.deadline
-                  ? <span className="text-ink" title={r.deadlineExact ?? undefined}>{r.deadline}</span>
-                  : <span className="text-muted">—</span>}
               </td>
 
               <td className="whitespace-nowrap border-b border-line px-3 py-[10px] text-right">

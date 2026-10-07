@@ -14,24 +14,35 @@ import { madridMidnightUtc, madridParts } from '@/lib/time';
 export type RungId =
   // After a failed delivery, counted forward from the failure.
   | 'f15' | 'f4h' | 'f24' | 'f48'
-  // At the office, counted backwards from the deadline D.
-  | 'o15' | 'o12' | 'o8' | 'o4' | 'o2' | 'o0'
+  /*
+   * At the office, counted forward from arrival.
+   *
+   * The ids are historical and deliberately kept: they used to mean "fifteen
+   * days left", "twelve days left" and so on, counted back from a deadline
+   * that was a guess. The days they fire on have not changed — a fifteen-day
+   * window put `o12` on day 3 after arrival, and `o12` is day 3 after arrival
+   * now — so keeping the ids means every rung a parcel has already fired stays
+   * fired, and nobody gets a reminder twice because we renamed something.
+   *
+   * `o0` is gone. It existed to say "the window is up", which was our
+   * arithmetic rather than Correos' — and Correos says it themselves, with an
+   * event, which the normal return handling already acts on.
+   */
+  | 'o15' | 'o12' | 'o8' | 'o4' | 'o2'
   // Nothing from Correos for too long.
   | 'stale';
 
 export type ExtraKind = 'recheck' | 'retry' | 'nochk';
 
 export type RungEffect =
-  /** Write a message: sent in Step 2, put in front of an operator in Step 1. */
+  /** Write a message: put in front of an operator, or sent if a provider can. */
   | { kind: 'message'; template: MessageTemplate }
   /** Put it on someone's call list. */
   | { kind: 'call_task'; reason: string; label: string }
   /** Ask Correos what happened. */
   | { kind: 'chase_carrier'; label: string }
   /** Correos normally has it at the office by now; go and look. */
-  | { kind: 'expect_at_office' }
-  /** The deposit window is up. Flag it and tell the office. */
-  | { kind: 'deadline_reached' };
+  | { kind: 'expect_at_office' };
 
 export interface DueRung {
   id: string;
@@ -45,8 +56,8 @@ export interface DueRung {
 export interface LadderInput {
   state: ShipmentState;
   failedAt: Date | null;
+  /** Correos' "A disposición del destinatario" time. The office rungs' anchor. */
   officeArrivedAt: Date | null;
-  officeDeadline: Date | null;
   lastEventAt: Date | null;
   /** Rungs that have already fired or been silenced. Never fire again. */
   fired: ReadonlySet<string>;
@@ -71,9 +82,8 @@ export const RUNG_TEXT: Record<RungId | ExtraKind, string> = {
   o15: 'Message with the office details and the code',
   o12: 'Reminder that it is still waiting',
   o8: 'Offer to send it somewhere else',
-  o4: 'Four days left warning',
-  o2: 'Last warning plus a call you cannot skip',
-  o0: 'Correos sends it back to us',
+  o4: 'Reminder that it has been there a while',
+  o2: 'Last reminder plus a call you cannot skip',
   stale: 'Flag it if Correos still says nothing',
   recheck: 'Check whether they actually collected it',
   retry: 'Bring them back to your call list',
@@ -91,35 +101,40 @@ const EFFECTS: Record<Exclude<RungId, 'stale'>, RungEffect> = {
   o4: { kind: 'message', template: 'office_four_days' },
   // o2 sends a message *and* books a call. The call is added by the runner.
   o2: { kind: 'message', template: 'office_last_call' },
-  o0: { kind: 'deadline_reached' },
 };
 
 /** Rungs a `delivered`, `collected` or customer reply silences. */
 export const SILENCEABLE: readonly RungId[] = ['f15', 'f4h', 'f24', 'f48', 'o15', 'o12', 'o8', 'o4', 'stale'];
-/** The two that survive a "they said they'd collect it" — they are the backstop. */
-export const FINAL_RUNGS: readonly RungId[] = ['o2', 'o0'];
+/** The one that survives a "they said they'd collect it" — it is the backstop. */
+export const FINAL_RUNGS: readonly RungId[] = ['o2'];
 
-/** Days before the deadline that each office rung fires. */
+/**
+ * Days after arrival at the office that each rung fires.
+ *
+ * Exactly the days the fifteen-day guess produced, so nothing shifts for a
+ * parcel already sitting at a counter: 15 − 12 = 3, 15 − 8 = 7, and so on.
+ * The difference is where the number comes from — the day Correos said the
+ * parcel got there, rather than a last day nobody confirmed.
+ */
 const OFFICE_OFFSETS: readonly { id: Exclude<RungId, 'stale'>; days: number }[] = [
-  { id: 'o15', days: 15 },
-  { id: 'o12', days: 12 },
-  { id: 'o8', days: 8 },
-  { id: 'o4', days: 4 },
-  { id: 'o2', days: 2 },
-  { id: 'o0', days: 0 },
+  { id: 'o15', days: 0 },
+  { id: 'o12', days: 3 },
+  { id: 'o8', days: 7 },
+  { id: 'o4', days: 11 },
+  { id: 'o2', days: 13 },
 ];
 
 /**
- * When an office rung is due: the start of the day that has N days left.
+ * When an office rung is due: the start of the Nth Madrid day after arrival.
  *
- * Counting in calendar days rather than subtracting N×24h from the deadline
- * instant matters twice a year, and it also means "4 days left" always lands
- * on the morning of the day it is true — not at whatever o'clock the parcel
- * happened to reach the counter a fortnight earlier.
+ * Counting in calendar days rather than adding N×24h matters twice a year, and
+ * it also means a reminder lands on the morning of its day rather than at
+ * whatever o'clock the parcel happened to reach the counter — nobody is
+ * messaged at 06:40 because that is when the van got there.
  */
-export function officeRungDueAt(deadline: Date, daysBefore: number): Date {
-  const p = madridParts(deadline);
-  return madridMidnightUtc(p.year, p.month, p.day - daysBefore);
+export function officeRungDueAt(arrivedAt: Date, daysAfter: number): Date {
+  const p = madridParts(arrivedAt);
+  return madridMidnightUtc(p.year, p.month, p.day + daysAfter);
 }
 
 /**
@@ -141,30 +156,18 @@ export function pendingRungs(s: LadderInput): DueRung[] {
     );
   }
 
-  if (s.state === 'at_office' && s.officeDeadline && s.officeArrivedAt) {
+  if (s.state === 'at_office' && s.officeArrivedAt) {
     const arrived = s.officeArrivedAt.getTime();
     for (const { id, days } of OFFICE_OFFSETS) {
-      const natural = officeRungDueAt(s.officeDeadline, days);
+      const natural = officeRungDueAt(s.officeArrivedAt, days);
 
-      if (id === 'o15') {
-        // The office-details message must always go out, even when the deposit
-        // window is shorter than fifteen days and its natural slot is in the
-        // past. A customer who is never told where the parcel is cannot
-        // collect it. Every other rung keeps the guard below.
-        out.push({
-          id,
-          base: id,
-          dueAt: natural.getTime() < arrived ? s.officeArrivedAt : natural,
-          effect: EFFECTS[id],
-        });
-        continue;
-      }
-
-      // A rung whose moment passed before the parcel even arrived never fires.
-      // This is what makes cutting the deposit days behave like real life:
-      // the early reminders are simply gone, the late ones still land.
-      if (natural.getTime() < arrived) continue;
-      out.push({ id, base: id, dueAt: natural, effect: EFFECTS[id] });
+      // `o15` is the message that says where the parcel is and what to show at
+      // the counter, and it is due on the day of arrival — whose Madrid
+      // midnight is behind us by the time the van gets there. A customer who
+      // is never told where their parcel is cannot collect it, so this one is
+      // due the moment it lands rather than at a midnight already past.
+      const dueAt = natural.getTime() < arrived ? s.officeArrivedAt : natural;
+      out.push({ id, base: id, dueAt, effect: EFFECTS[id] });
     }
   }
 
