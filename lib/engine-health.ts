@@ -106,7 +106,7 @@ export interface JobHealth {
  */
 export const JOB_CADENCE: Record<ScheduledJobName, string> = {
   'escalation-tick': 'every 30 minutes',
-  reconcile: 'every 3 hours',
+  reconcile: 'hourly, asking only about the parcels that are due',
   'shopify-backfill': 'hourly',
   'stale-detector': 'hourly, does the work once a day from 07:30 Madrid',
   'daily-digest': 'hourly, does the work once a day from 08:00 Madrid',

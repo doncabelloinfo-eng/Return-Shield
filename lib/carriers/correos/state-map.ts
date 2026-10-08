@@ -91,7 +91,6 @@ const DESCRIPTION_ALIASES: Record<string, string> = {
   'envio clasificado': 'en transito',
   'clasificado': 'en transito',
   'llegada a la oficina de destino': 'en transito',
-  'alta en unidad de reparto': 'en transito',
   'a disposicion del destinatario': 'disponible en oficina para recoger',
   'envio entregado en buzon domiciliario': 'entregado',
   'retorno a remitente': 'devolucion a origen iniciada',
@@ -118,6 +117,24 @@ const DESCRIPTION_ALIASES: Record<string, string> = {
    * "Desestacionado" and "Entrega modificada". Neither meaning is clear from
    * the words alone, so they stay in the review queue until Correos tell us.
    */
+  /*
+   * "Alta en la unidad de reparto" — `G01L010V`.
+   *
+   * Correos' own tracker files this under OUT FOR DELIVERY, with the text
+   * "Your shipment has arrived at the unit responsible for its delivery". So
+   * `out_for_delivery` it is, by their classification rather than our reading
+   * of the words.
+   *
+   * BOTH spellings are here, and that is the point of listing them together.
+   * `'alta en unidad de reparto'` — no "la" — used to sit in the canonical
+   * table mapped to `en transito`, taken off Correos' public web tracker; the
+   * feed sends the longer spelling, which was left in the review queue. One
+   * event, two keys, two different answers, and a round spent explaining why
+   * they had to stay apart. They do not: Correos settled it.
+   */
+  'alta en la unidad de reparto': 'en reparto',
+  'alta en unidad de reparto': 'en reparto',
+
   'intento de entrega. ausente': 'intento de entrega fallido - ausente',
   'finalizado plazo retirada': 'devolucion a origen iniciada',
   'devolucion del envio por finalizacion de plazo de retirada': 'devolucion a origen iniciada',
@@ -143,7 +160,6 @@ const DESCRIPTION_ALIASES: Record<string, string> = {
    *   H01R424V  Realizado intento de entrega
    *   H06P010V  En proceso de entrega
    *   H06P050V  En proceso de entrega
-   *   G01L010V  Alta en la unidad de reparto
    *   M010090R  Envío a estacionar
    *   M01E020R  Envío a estacionar
    *   M01E320R  Estacionado
@@ -157,13 +173,9 @@ const DESCRIPTION_ALIASES: Record<string, string> = {
    * delivered. It is a near-miss for the four `intento de entrega …` keys
    * above, and it matches none of them.
    *
-   * "Alta en la unidad de reparto" is the other near-miss, and worth a word.
-   * `'alta en unidad de reparto'` — no "la" — IS mapped, a few lines up, from
-   * Correos' public tracker rather than from their feed. The two normalise to
-   * different keys, so the real event stays in the review queue as asked. Do
-   * NOT tidy them into one: the mapped spelling is our reading of a wording we
-   * saw on a web page, and this one is what the API sends and is still a
-   * question for Correos.
+   * `G01L010V` "Alta en la unidad de reparto" used to be on this list, and
+   * Correos answered it: their own tracker files it under OUT FOR DELIVERY.
+   * Both spellings of it are mapped above.
    */
   'en proceso de devolucion': 'devolucion a origen iniciada',
   'direccion incorrecta. se procede a remitir el envio a la oficina de referencia': 'direccion incorrecta',
@@ -203,6 +215,11 @@ const BY_CODE: Record<string, ShipmentState> = {
   H01R420V: 'failed',           // "Intento de entrega. Ausente" · EN ENTREGA
   L03D045R: 'returning',        // "En proceso de devolución" · DEVOLUCION
   H01R421V: 'bad_address',      // "Dirección Incorrecta. Se procede a remitir…"
+
+  // Correos' own tracker groups this one under OUT FOR DELIVERY: "Your
+  // shipment has arrived at the unit responsible for its delivery". It is the
+  // van, not the depot. See the note on both wordings above.
+  G01L010V: 'out_for_delivery', // "Alta en la unidad de reparto" · EN ENTREGA
 };
 
 /**

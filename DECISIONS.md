@@ -690,6 +690,203 @@ the pages. That is the only check that would have caught it.
 
 ---
 
+## 6c. The automatic check was reading a year-old cache
+
+The urgent one, and the most instructive failure in this project so far.
+
+### What it looked like
+
+Parcel `PKA6TP9800094740148903F` showed *Pre-admission* all day on 8 October.
+Correos' public tracker had six events for it, the last being "Alta en la
+unidad de reparto" at 12:56. Six consecutive hourly runs reported this:
+
+| Run | Asked | Changed | Events stored |
+| --- | --- | --- | --- |
+| 7 Oct 21:10 … 8 Oct 12:10 (six runs) | 201 each | 0 | **0** |
+| manual Refresh, 8 Oct 12:38 | 201 | 88 | **409**, for 92 parcels |
+
+Twenty-eight minutes after the last automatic run came up empty, a manual
+Refresh asked the same 201 parcels and got everything. Every screen in the app
+looked perfectly healthy throughout.
+
+### The cause, reproduced before anything was changed
+
+Next's App Router patches global `fetch`. A GET with no `cache` option, called
+from inside a route handler, is written to the **on-disk Data Cache**. Three
+cron runs against a stub that answered differently each time produced **one**
+outbound request, and the cache file was there on disk:
+
+```
+.next/cache/fetch-cache/d6b9a3fa…
+  kind: FETCH   url: …/search/PQ7837992005ES   status: 200
+  revalidate: 31536000        ← one year
+```
+
+With `cache: 'no-store'`, the same three runs made three requests, stored three
+answers, and left the cache directory empty.
+
+Reading the Next 14.2 source afterwards says exactly why, and it is worth
+writing down because two of the three steps are counter-intuitive:
+
+- `app-route/module.js` handles `dynamic = 'force-dynamic'` by setting
+  `forceDynamic = true` — and the cache decision in `patch-fetch.js` **never
+  reads `forceDynamic`**. It governs rendering, not fetching.
+- the route exports no `revalidate`, so the store's `revalidate` becomes
+  `false`, and in `patch-fetch.js` `false` means *cache indefinitely*:
+  `isCacheableRevalidate` is `typeof revalidate === 'number' && revalidate > 0
+  || revalidate === false`, and the normalised value is then `CACHE_ONE_YEAR`.
+- there IS an escape hatch for an `Authorization` header — `autoNoCache` — and
+  it does not fire, because it requires `hasUnCacheableHeader &&
+  staticGenerationStore.revalidate === 0`, and ours is `false`, not `0`.
+
+Worse: taking the `force-dynamic` branch **skips** `proxyNextRequest`, so
+reading `req.headers` in `lib/cron.ts` records no dynamic access and nothing
+ever flips `revalidate` to `0`. The one config we had was making it worse.
+
+### Why it looked intermittent, and why Refresh always worked
+
+The cache key is built from the URL **and the init object**, headers included —
+so the bearer token is part of it. Rotating only the token, with the same URL
+and the same stub, produced a fresh request, a stored event and a third cache
+entry. That is the whole of why two runs on 7 October did store events: they
+minted a new token. And manual Refresh is a POST server action, which Next
+never caches.
+
+### What would not have caught it
+
+Worth being explicit, because the previous round's verification did all three:
+
+- **`npm run build` passes.** Checked by putting the bug back: `✓ Compiled
+  successfully`. The rule applies when the module runs, not when it compiles.
+- **Every page renders.** `GET /office` is 200. Only the outbound fetch was
+  affected, and nothing on a page told you.
+- **The whole test suite passes.** Vitest calls `reconcile()` directly; Next's
+  patched `fetch` is not in the picture.
+
+### The fix, and the second line of defence
+
+`cache: 'no-store'` on every outbound call (Correos tracking, the CorreosID
+token, the Shopify Admin API, WhatsApp) and `fetchCache = 'force-no-store'` on
+every cron route. `tests/no-store.test.ts` reads the files and fails on a call
+or a route that drops either — verified to fail on exactly the lines that were
+missing.
+
+But a fix cannot be the only defence against a failure whose character is that
+everything looks fine. So the run detail now records **`newEvents`**, the number
+of events stored, and Settings warns when three consecutive runs each asked
+about more than fifty parcels and stored none. `changed: 0` was never enough:
+it is also what a quiet night looks like. Zero *events* across three busy runs
+is not.
+
+---
+
+## 6d. Every parcel twice a day, as cheaply as possible
+
+The sweep used to ask about every live parcel on every run, every three hours.
+At 201 parcels and one request each that was 114 seconds of a function being
+alive, to learn that 190 of them had not moved.
+
+Vercel bills memory for the whole time a function is alive and processor time
+only while code is running. This sweep spends nearly all of its life waiting on
+Correos, so **what it costs is wall-clock** — not work done. Which makes the
+lever obvious: ask about fewer parcels, finish sooner, and run more often so
+the promise is still kept.
+
+### The rule
+
+`lib/recheck.ts`: every live parcel at least every `RECHECK_HOURS` (12), and
+every `URGENT_RECHECK_HOURS` (3) for the four states where being out of date
+costs something — out for delivery, a failed delivery, a wrong address, and
+waiting at a post office. Finished parcels are never asked about.
+
+`out_for_delivery` was not on the urgent list before. It should have been: it is
+the state a failed delivery comes out of, and the gap between "the van has it"
+and "nobody was home" is the gap in which a customer can still be told.
+
+The cron is now **hourly** (`10 * * * *`) and passes `dueOnly`. Most hours that
+is a handful of parcels or none, and a run with nothing due ends in about forty
+milliseconds without minting a token or making a request. Hourly is also what
+makes a three-hour promise keepable at all: on a three-hourly schedule, one
+dropped invocation breaks it.
+
+Manual Refresh does **not** pass `dueOnly`. Somebody pressing a button is asking
+about everything, and "nothing was due" is not an answer to that.
+
+### Narrowing instead of giving up
+
+A refused batch used to drop straight to one request per parcel, for the life of
+the instance. On production a batch of 75 was refused with an HTML 403 — so all
+201 parcels got their own request, and nobody ever found out whether 37 would
+have worked.
+
+Now a refusal **halves** the size and tries again: 75 → 37 → 18 → 9 → 4 → 2, and
+only a refused batch of two means one parcel per request. The largest size that
+worked is kept in `correosBatchSize`, and once a day the sweep tries double it,
+because a gateway limit is not a law of nature and a number written down for
+good would never be revisited.
+
+Two subtleties that each took a bug to find:
+
+- the size is halved from **the size that was refused**, not from the ceiling,
+  so a refused chunk of ten tries five rather than fifty;
+- what gets written back is only what the run **demonstrated**, and only ever
+  upwards — unless a refusal actually narrowed it. A quiet hour with six parcels
+  due proves six works and says nothing about eighteen, and the first version of
+  this happily wrote `100` into settings on a run whose largest request was six.
+
+### What the operator sees
+
+A panel on Settings: the batch size and why it is not larger, the throughput
+**measured** from recent runs rather than derived from a rate limit, the live
+count, and either "every parcel checked in the last 12 hours" or the overdue
+count in red. Below it, "Correos checks kept the server busy N minutes today" —
+the sum of the runs' durations, which is the number that decides the bill.
+
+Overdue is deliberately not the same as due. Due means it is time to ask;
+overdue means the promise has been broken, with an hour of grace for the gap
+between runs, and measured from `COALESCE(last_reconciled_at, created_at)` so
+that the minute after an upload every new parcel is due and none is red.
+
+---
+
+## 6e. A progress bar for a two-minute wait
+
+A button that says "Asking Correos…" for two minutes is indistinguishable from
+a button that has hung.
+
+The sweep writes its progress to a `sweepProgress` row in the existing
+`settings` table — **no migration** — at most every two seconds, and a small
+authenticated `no-store` route reads it. The browser polls that route every
+second and a half while a sweep is running and every twenty seconds otherwise.
+
+Putting the row in the database rather than in component state buys three things
+that would each have needed their own mechanism:
+
+- the **hourly cron** appears on the bar too, labelled "Automatic check",
+  because it writes the same row from a different serverless instance. The
+  operator can see the engine working without reading a job table;
+- **pressing Refresh during a sweep** shows that sweep, because the bar is
+  already drawing it;
+- the **final line stays** for ninety seconds, because "what did that do" is a
+  question asked after the event.
+
+Two things had to be got right, and both were wrong first time:
+
+- the progress has to be reported **from inside the client**, as each request
+  comes back. Reporting it from the caller's loop left the bar at "0 of 12" for
+  eight seconds and then jumped it to 100%, because that is exactly when the
+  caller found out. `lookupMany` takes an `onAnswered` callback now.
+- `updatedAt` has to be the moment of **that write**, not the run's start. It is
+  read for the "about a minute left" estimate and for spotting a killed
+  instance — a row nobody has written to for twelve seconds is a dead run — and
+  a frozen stamp made both meaningless.
+
+`changed` lags the bar by one chunk, which is honest: a parcel is *checked* when
+Correos has answered about it, and whether anything changed is not known until
+the events have been written.
+
+---
+
 ## 7. Where I departed from the prototype
 
 The prototype is the specification, and I ported it. These are the places I did

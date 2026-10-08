@@ -51,6 +51,8 @@ export class WhatsAppCloudProvider implements MessageProvider {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(body),
+        // One rule for every outbound call. See trackpub.ts.
+        cache: 'no-store',
         signal: AbortSignal.timeout(15_000),
       });
 

@@ -131,17 +131,20 @@ function correosTrackpub(batchMode: string): Integration {
   }
 
   const mode = batchMode === 'comma'
-    ? 'Asking about a hundred parcels per request.'
+    ? 'Several parcels per request — the exact number is below, under Checking with Correos.'
     : batchMode === 'single'
-      ? 'Correos would not take a batch, so it is asking one parcel per request — slower, '
-        + 'and worth re-testing with the button above if that was a one-off.'
+      ? 'Correos would not take a batch of two, so it is asking one parcel per request. '
+        + 'A larger batch is tried again once a day in case their limit has moved.'
       : 'It has not needed a batch yet, so the multi-parcel format is still untested.';
 
   return {
     key: 'correos-trackpub',
     name: 'Correos tracking',
     status: 'ready',
-    detail: `Sweeping every three hours, urgent parcels first. ${mode}`,
+    // Hourly, and only the parcels that are due: see lib/recheck.ts. The
+    // capacity and the cost are on their own panel, because they are numbers
+    // the operator watches rather than a connection status.
+    detail: `Checking every hour, urgent parcels first. ${mode}`,
     missingVars: [],
   };
 }

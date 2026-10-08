@@ -1,5 +1,5 @@
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, ne, notInArray, or, sql as raw } from 'drizzle-orm';
-import { getDb } from '@/db';
+import { getDb, rowsOf, at as ts } from '@/db';
 import {
   correosPushInbox, jobRuns, offices, orders, postcodeStats,
   shipmentEvents, shipments, stores, importBatches, tasks,
@@ -7,9 +7,14 @@ import {
 import { now, DAY, HOUR } from '@/lib/clock';
 import { madridParts, madridMidnightUtc, madridDateKey, human, shortDate } from '@/lib/time';
 import { normalisePayload } from '@/lib/carriers/correos/normalise';
-import { MAX_BATCH, trackpub } from '@/lib/carriers/correos/trackpub';
+import { nextSizeUp, shouldProbeLargerBatch, trackpub } from '@/lib/carriers/correos/trackpub';
 import { ingestEvent, settleHistory } from '@/lib/shipments/ingest';
 import { remapKnownEvents } from '@/lib/shipments/remap';
+import {
+  countLive, countOverdue, dueCutoffs, dueSql, liveSql,
+  recheckHours, urgentRecheckHours, URGENT_STATES,
+} from '@/lib/recheck';
+import { progressWriter, startProgress } from '@/lib/sweep-progress';
 import { liveShipmentIds } from '@/lib/shipments/repo';
 import { runTick } from '@/lib/escalation/run';
 import { openTask } from '@/lib/escalation/tasks';
@@ -203,6 +208,18 @@ export async function drainPushInbox(limit = 200): Promise<JobResult> {
  * The safety net for push. Push has no guaranteed retry, so if the receiver
  * was down for an hour, this is the only thing that will ever notice.
  */
+/**
+ * How many parcels are dealt with before their "checked" stamps are written.
+ *
+ * Not a request size — the client decides that, and halves it when Correos
+ * refuses (see lib/carriers/correos/trackpub.ts). This is the unit of work
+ * between stamp writes, and it exists so that a run killed half way through
+ * has still recorded the parcels it genuinely checked. One UPDATE per parcel
+ * would be five thousand round trips through a pooler for a sweep that made
+ * fifty HTTP requests; no stamping until the end would lose the lot.
+ */
+const STAMP_EVERY = 100;
+
 export interface ReconcileOptions {
   /** Most parcels to consider in one run. The budget is the real limiter. */
   batchSize?: number;
@@ -217,19 +234,27 @@ export interface ReconcileOptions {
    * still save the ones already sitting at a post office.
    */
   onlyUnswept?: boolean;
+  /**
+   * Only the parcels the twelve-hour rule says are due.
+   *
+   * What the hourly cron passes, and the whole of why the cron can run twelve
+   * times as often as it used to for less money. Manual Refresh does NOT pass
+   * it: a person pressing the button is asking about everything, and being
+   * told "nothing was due" is not an answer to that.
+   *
+   * See lib/recheck.ts for the rule.
+   */
+  dueOnly?: boolean;
+  /** Shown in the progress bar as "Checking with Correos" rather than "Automatic check". */
+  manual?: boolean;
 }
 
-/**
- * States where being out of date actually costs something.
- *
- * A parcel at a post office is on a countdown; one whose delivery failed is
- * about to be; one with a bad address is waiting on a person. Everything else
- * is moving normally, and learning about it three hours late changes nothing.
- *
- * The brief called these delivery_failed, at_office and address_issue. This
- * codebase calls them failed, at_office and bad_address — same three states.
+/*
+ * The states where being out of date costs something, the twelve-hour rule and
+ * the three-hour one all live in lib/recheck.ts now, because three other
+ * things read them: the queue below, the Settings capacity line, and the
+ * digest's overdue count.
  */
-const URGENT_STATES = ['failed', 'at_office', 'bad_address'];
 
 /**
  * Ask Correos about every live parcel, urgent ones first.
@@ -260,7 +285,30 @@ export async function reconcile(opts: ReconcileOptions = {}): Promise<JobResult>
   const remap = await remapKnownEvents();
 
   const knownMode = await getSetting('correosBatchMode');
-  const client = trackpub({ batchMode: knownMode });
+  const knownSize = await getSetting('correosBatchSize');
+  const probedAt = await getSetting('correosBatchProbedAt');
+
+  /*
+   * Start from the largest size Correos has been seen to accept — or, once a
+   * day, from double it.
+   *
+   * The daily probe costs one refused request and is the only thing that would
+   * ever find out that the limit has moved. Without it a single bad afternoon
+   * on the gateway would pin the sweep to one parcel per request for ever,
+   * which is exactly what happened: a batch of 75 was refused with an HTML 403
+   * and all 201 parcels got their own request from then on.
+   */
+  const probe = shouldProbeLargerBatch(probedAt, now());
+  const startSize = probe ? nextSizeUp(knownSize) : knownSize;
+  const client = trackpub({
+    // The probe opens up a remembered 'single', because otherwise the client
+    // would take the one-request-per-parcel path and the larger size would
+    // never actually be tried. A remembered 'comma' keeps its proven status:
+    // that is what stops a batch of freshly printed labels, which Correos
+    // legitimately knows nothing about, reading as a broken format.
+    batchMode: probe && knownMode === 'single' ? 'unknown' : knownMode,
+    batchSize: startSize,
+  });
 
   if (!client.configured) {
     return {
@@ -285,40 +333,86 @@ export async function reconcile(opts: ReconcileOptions = {}): Promise<JobResult>
   const elapsedFrom = Date.now();
   const runStartedAt = now();
 
-  // Urgent first, then least-recently-checked. The ordering IS the cursor: a
-  // run that stops early leaves the rest with an older stamp, so the next run
-  // continues from exactly where this one gave up — nothing to persist, nothing
-  // to get out of step when parcels are added or finish, and no parcel can be
-  // starved because the one checked longest ago is always next in its bucket.
-  const queue = await getDb().select({
-    id: shipments.id,
-    code: shipments.shippingCode,
-    state: shipments.state,
-    /**
-     * Never asked about before, so whatever Correos is about to tell us is
-     * HISTORY rather than news. A parcel pulled from thirty days back may have
-     * been delivered a fortnight ago; narrating every step of that, and firing
-     * the reminders that were due while we were not looking, is what
-     * `settleHistory` exists to prevent.
-     */
-    firstRead: raw<boolean>`${shipments.lastReconciledAt} IS NULL`,
-  })
-    .from(shipments)
-    .where(and(
-      isNull(shipments.droppedAt),
-      notInArray(shipments.state, ['delivered', 'collected', 'returned']),
-      opts.onlyUnswept ? isNull(shipments.lastReconciledAt) : undefined,
-    ))
-    .orderBy(
-      raw`CASE WHEN ${shipments.state} IN ('failed', 'at_office', 'bad_address') THEN 0 ELSE 1 END ASC`,
-      raw`${shipments.lastReconciledAt} ASC NULLS FIRST`,
-      asc(shipments.createdAt),
-    )
-    .limit(batchSize);
+  /*
+   * Urgent first, then longest since its last check. The ordering IS the
+   * cursor: a run that stops early leaves the rest with an older stamp, so the
+   * next run continues from exactly where this one gave up — nothing to
+   * persist, nothing to get out of step when parcels are added or finish, and
+   * no parcel can be starved because the one checked longest ago is always
+   * next in its bucket.
+   *
+   * `dueOnly` is what the hourly cron passes. Raw SQL rather than drizzle's
+   * builder because the due rule is one predicate shared with the Settings
+   * capacity line and the digest, and it lives in lib/recheck.ts — written
+   * once, not three times.
+   */
+  const cutoffs = dueCutoffs(runStartedAt);
+  const scope = opts.onlyUnswept
+    ? raw`${liveSql()} AND s.last_reconciled_at IS NULL`
+    : (opts.dueOnly ? dueSql(cutoffs) : liveSql());
+  const urgentList = raw.join(
+    (URGENT_STATES as readonly string[]).map((state) => raw`${state}`),
+    raw`, `,
+  );
+
+  const queue = rowsOf<{ id: string; code: string; state: string; first_read: boolean }>(
+    await getDb().execute(raw`
+      SELECT s.id,
+             s.shipping_code AS code,
+             s.state,
+             -- Never asked about before, so whatever Correos is about to tell
+             -- us is HISTORY rather than news. A parcel pulled from thirty
+             -- days back may have been delivered a fortnight ago; narrating
+             -- every step of that, and firing the reminders that were due
+             -- while we were not looking, is what settleHistory prevents.
+             (s.last_reconciled_at IS NULL) AS first_read
+        FROM shipments s
+       WHERE ${scope}
+       ORDER BY CASE WHEN s.state IN (${urgentList}) THEN 0 ELSE 1 END ASC,
+                s.last_reconciled_at ASC NULLS FIRST,
+                s.created_at ASC
+       LIMIT ${batchSize}
+    `),
+  ).map((r) => ({ id: r.id, code: r.code, state: r.state, firstRead: r.first_read }));
+
+  /*
+   * Nothing due: stop here, without a token and without a request.
+   *
+   * This is the point of running hourly. Most hours have a handful of parcels
+   * due or none at all, and a run that ends in forty milliseconds costs
+   * essentially nothing — where the old three-hourly run asked about all 201
+   * parcels every time and stayed alive for 114 seconds to learn that 190 of
+   * them had not moved.
+   */
+  if (opts.dueOnly && queue.length === 0) {
+    return {
+      skipped: true,
+      detail: {
+        skipped: 'nothing was due',
+        live: await countLive(),
+        recheckHours: recheckHours(),
+        urgentRecheckHours: urgentRecheckHours(),
+        ...(remap.events ? { remappedEvents: remap.events, remappedParcels: remap.moved } : {}),
+      },
+    };
+  }
 
   const byCode = new Map(queue.map((q) => [q.code.toUpperCase(), q.id]));
   const firstRead = new Set(queue.filter((q) => q.firstRead).map((q) => q.code.toUpperCase()));
   let settledHistory = 0;
+
+  /*
+   * The progress row, written before the first request so the bar appears at
+   * "0 of 201" rather than materialising a third of the way through. Both the
+   * manual Refresh and this hourly cron write it, which is how the automatic
+   * check becomes visible to anyone with the app open.
+   */
+  const progressRow = await startProgress({
+    total: queue.length,
+    manual: opts.manual === true,
+    at: runStartedAt,
+  });
+  const writeProgress = progressWriter(progressRow);
   /**
    * Events that were genuinely new to a parcel we were already watching.
    *
@@ -342,7 +436,7 @@ export async function reconcile(opts: ReconcileOptions = {}): Promise<JobResult>
   let stoppedEarly: string | null = null;
   const failures: string[] = [];
 
-  for (let i = 0; i < queue.length; i += MAX_BATCH) {
+  for (let i = 0; i < queue.length; i += STAMP_EVERY) {
     // Check the budget before starting a request, never in the middle of one.
     // Being killed mid-sweep is how a parcel gets stamped as checked without
     // having been checked.
@@ -351,12 +445,26 @@ export async function reconcile(opts: ReconcileOptions = {}): Promise<JobResult>
       break;
     }
 
-    const chunk = queue.slice(i, i + MAX_BATCH).map((q) => q.code);
+    const chunk = queue.slice(i, i + STAMP_EVERY).map((q) => q.code);
     // Hand the client our deadline so it can stop between requests rather than
     // only between batches — a chunk that falls back to one request per parcel
     // is a hundred requests, and a budget checked only after all of them is
     // not a budget.
-    const result = await client.lookupMany(chunk, { deadline: elapsedFrom + budgetMs });
+    const result = await client.lookupMany(chunk, {
+      deadline: elapsedFrom + budgetMs,
+      /*
+       * The bar has to move while the requests are happening, which is where
+       * all the time goes. Reporting from the loop below instead left it at
+       * "0 of 12" for eight seconds and then jumped it to 100% — because that
+       * is exactly when this function found out.
+       *
+       * `changed` lags by one chunk, and that is honest: a parcel is "checked"
+       * when Correos has answered about it, and whether anything changed is
+       * not known until the events are written.
+       */
+      onAnswered: (answered) =>
+        writeProgress({ checked: asked + answered, changed: changedParcels.size }),
+    });
     requests += result.requests;
 
     /** Parcels we genuinely got an answer about, and may stamp as checked. */
@@ -379,6 +487,8 @@ export async function reconcile(opts: ReconcileOptions = {}): Promise<JobResult>
             if (ingested.shipmentId) changedParcels.add(ingested.shipmentId);
           }
         }
+
+        await writeProgress({ checked: asked, changed: changedParcels.size });
 
         if (history) {
           const id = byCode.get(code);
@@ -431,6 +541,25 @@ export async function reconcile(opts: ReconcileOptions = {}): Promise<JobResult>
   if (client.mode !== knownMode) await setSetting('correosBatchMode', client.mode);
 
   /*
+   * And the SIZE, which is the number that matters now.
+   *
+   * `client.batchSize` is what this run DEMONSTRATED, which is a floor rather
+   * than a ceiling: a run with six parcels due proves six works and says
+   * nothing about eighteen. So it only ever raises the remembered size —
+   * unless a refusal actually narrowed it, which is the one case where a
+   * smaller number is the truth and has to be written down.
+   *
+   * 0 means nothing was learnt at all (not configured, nothing to look up, the
+   * deadline first) and the stored size is left exactly as it was.
+   */
+  const learnt = client.batchSize;
+  if (learnt > 0) {
+    const next = client.narrowed ? learnt : Math.max(knownSize, learnt);
+    if (next !== knownSize) await setSetting('correosBatchSize', next);
+  }
+  if (probe) await setSetting('correosBatchProbedAt', runStartedAt.toISOString());
+
+  /*
    * Only count what was genuinely news. A first read of a pulled parcel brings
    * in its whole past, so `recovered` would be twenty events about a parcel
    * delivered a fortnight ago — "found 4,000 updates that had not reached us"
@@ -451,10 +580,38 @@ export async function reconcile(opts: ReconcileOptions = {}): Promise<JobResult>
       ),
     ));
 
+  const tookMs = Date.now() - elapsedFrom;
+
+  // The final write always happens, whatever the throttle says: the line that
+  // stays on screen afterwards is the answer to "what did that do".
+  await writeProgress(
+    {
+      checked: asked,
+      changed: changedParcels.size,
+      done: true,
+      tookMs,
+      ...(stoppedEarly ? { stoppedEarly } : {}),
+    },
+    { force: true },
+  );
+
+  const overdue = await countOverdue(runStartedAt);
+
   return {
     detail: {
       asked,
       changed: changedParcels.size,
+      /**
+       * EVENTS STORED, which is the number that would have made a day of
+       * stale answers obvious.
+       *
+       * Six hourly runs in a row reported "asked 201, changed 0" while Correos
+       * had hundreds of events nobody could see, and "changed 0" is also what a
+       * perfectly healthy quiet night looks like. `newEvents` separates the
+       * two: zero events stored across three runs that asked about hundreds of
+       * parcels is not a quiet night, and the Settings screen now says so.
+       */
+      newEvents: recovered,
       ...(news !== recovered ? { news } : {}),
       recovered,
       missing,
@@ -463,7 +620,10 @@ export async function reconcile(opts: ReconcileOptions = {}): Promise<JobResult>
       batchMode: client.mode,
       ...(client.diagnosis ? { batchNote: client.diagnosis } : {}),
       stillToCheck: remaining?.n ?? 0,
-      tookMs: Date.now() - elapsedFrom,
+      overdue,
+      batchSize: client.batchSize,
+      ...(probe ? { probedLargerBatch: startSize } : {}),
+      tookMs,
       ...(settledHistory ? { settledHistory } : {}),
       ...(remap.events ? { remappedEvents: remap.events, remappedParcels: remap.moved } : {}),
       ...(remap.resolved.length ? { nowRecognised: remap.resolved } : {}),
@@ -559,23 +719,44 @@ export async function dailyDigest(): Promise<JobResult> {
     ]
     : [];
 
+  /*
+   * Parcels Correos has not been asked about within the rule — a different
+   * thing from the line above, which is about parcels that are old.
+   *
+   * It is here because the promise is invisible otherwise. Every live parcel is
+   * supposed to be checked at least twice a day, and the day that stopped
+   * happening every screen still looked healthy. A count in the digest is the
+   * one place it reaches somebody who is not looking at the dashboard.
+   */
+  const notChecked = await countOverdue(now());
+  const notCheckedLines = notChecked > 0
+    ? [
+      `· ${notChecked} ${notChecked === 1 ? 'parcel has' : 'parcels have'} not been `
+      + `checked with Correos within the last ${recheckHours()} hours`
+      + ` (${urgentRecheckHours()} for the urgent ones): ${appUrl()}/settings`,
+    ]
+    : [];
+
   if (!view.rows.length) {
     await raiseAlert({
       dedupeKey: `digest-empty:${madridDateKey(now())}`,
       subject: 'Return Shield — nothing needs you today',
       lines: [
         'Every parcel is either moving normally or already handled.',
-        ...(overdueLines.length ? ['', ...overdueLines] : []),
+        ...(overdueLines.length || notCheckedLines.length
+          ? ['', ...overdueLines, ...notCheckedLines]
+          : []),
         '',
         'Nothing to do. Have a good morning.',
       ],
     });
-    return { detail: { items: 0, overdue } };
+    return { detail: { items: 0, overdue, notChecked } };
   }
 
   const lines: string[] = [view.headline, ''];
   for (const d of view.digest) lines.push(`· ${d}`);
   for (const d of overdueLines) lines.push(d);
+  for (const d of notCheckedLines) lines.push(d);
   lines.push('', 'In order, most money at risk first:', '');
 
   view.rows.slice(0, 15).forEach((r, i) => {
@@ -599,7 +780,7 @@ export async function dailyDigest(): Promise<JobResult> {
     lines,
   });
 
-  return { detail: { items: view.rows.length, calls: view.callCount, raised } };
+  return { detail: { items: view.rows.length, calls: view.callCount, notChecked, raised } };
 }
 
 /* ----------------------------------------------------------------- hourly */

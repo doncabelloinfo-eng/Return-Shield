@@ -341,7 +341,7 @@ describe('the confirmed event codes', () => {
     // arrived with them and are deliberately absent: see
     // tests/wordings.test.ts, which holds both lists and the wordings.
     expect(knownCodes().sort()).toEqual([
-      'A010000V', 'A090000V', 'H01I350V', 'H01R420V', 'H01R421V',
+      'A010000V', 'A090000V', 'G01L010V', 'H01I350V', 'H01R420V', 'H01R421V',
       'L03D045R', 'L03D320R', 'P040000V',
     ]);
   });
@@ -353,6 +353,7 @@ describe('the confirmed event codes', () => {
     ['H01I350V', 'A disposición del destinatario', 'at_office'],
     ['H01R420V', 'Intento de entrega. Ausente', 'failed'],
     ['H01R421V', 'Dirección Incorrecta. Se procede a remitir el envio a la oficina de referencia', 'bad_address'],
+    ['G01L010V', 'Alta en la unidad de reparto', 'out_for_delivery'],
   ])('%s (%s) → %s', (code, desc, state) => {
     const match = matchCorreosEvent(code, desc, 'EN CAMINO');
     expect(match).toEqual({ state, via: 'code' });

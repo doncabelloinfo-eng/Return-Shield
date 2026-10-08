@@ -19,9 +19,23 @@ import { env, envOr } from '@/lib/env';
  * The batch format is the awkward part. The /search documentation says "Se
  * permite consultar un máximo de 100 envíos por petición" and then does not say
  * how to send more than one. So this guesses comma-separated, checks whether
- * the answer actually covered the codes it asked about, and falls back to one
- * request per code when it did not — permanently, for the life of the instance,
- * and reporting which mode it settled on so the operator can see it.
+ * the answer actually covered the codes it asked about, and NARROWS when it
+ * did not.
+ *
+ * Narrowing, not giving up. A refused batch used to drop straight to one
+ * request per code, permanently — and on production a batch of 75 was refused
+ * with an HTML 403, so all 201 parcels got their own request and nobody knew
+ * whether 37 would have worked. Now a refusal halves the size and tries again:
+ * 75 → 37 → 18 → 9 → 4 → 2, and only a refused batch of two means one parcel
+ * per request. The largest size that worked is remembered in settings, and
+ * once a day the sweep tries double it, because a gateway's limit is not a law
+ * of nature and a number written down for good would never be revisited.
+ *
+ * Why it is worth the trouble when the operator has said one-per-request is
+ * acceptable: Vercel bills memory for the whole time a function is alive, and
+ * this sweep spends nearly all of its life waiting on Correos. Batches do not
+ * make it cheaper per parcel, they make the run SHORTER — which is the thing
+ * being billed.
  *
  * The thing that must never happen: a batch that returns 200 while covering
  * three of the hundred codes sent, read as "97 parcels have no news". That
@@ -46,6 +60,49 @@ export const MAX_BATCH = 100;
  */
 const MAX_PATH_BYTES = 1800;
 
+/**
+ * The smallest batch worth asking for.
+ *
+ * Below this there is nothing left to halve: a "batch" of one IS one request
+ * per parcel, so a refused two means single. Named rather than inlined because
+ * the halving ladder and the test that walks it both have to agree on where it
+ * stops.
+ */
+export const MIN_BATCH = 2;
+
+/**
+ * Halve a refused size, never below one.
+ *
+ * `Math.floor`, so 75 → 37 → 18 → 9 → 4 → 2 → 1, and 1 is the single path.
+ */
+export function halve(size: number): number {
+  return Math.max(1, Math.floor(size / 2));
+}
+
+/**
+ * Double a known-good size, for the once-a-day probe. Capped at the documented
+ * ceiling, and 0 (nothing known) means try the ceiling itself.
+ */
+export function nextSizeUp(known: number): number {
+  if (known <= 0) return MAX_BATCH;
+  return Math.min(MAX_BATCH, Math.max(MIN_BATCH, known * 2));
+}
+
+/**
+ * Is it time to try a larger batch again?
+ *
+ * Once a day, and on the first run after a deploy (an empty stamp). A gateway
+ * limit is not a law of nature — Correos can change it, and a size written
+ * down for good would never be revisited — but probing costs a refused request
+ * on every run if it is not rationed, so it is rationed.
+ */
+export function shouldProbeLargerBatch(probedAt: string, at: Date): boolean {
+  if (!probedAt) return true;
+  const last = Date.parse(probedAt);
+  if (!Number.isFinite(last)) return true;
+  return at.getTime() - last >= 24 * 60 * 60 * 1000;
+}
+
 export interface TrackpubOptions {
   baseUrl?: string;
   clientId?: string;
@@ -56,6 +113,12 @@ export interface TrackpubOptions {
   tokenProvider?: CorreosTokenProvider;
   /** What we already know about the batch format, from settings. */
   batchMode?: BatchMode;
+  /**
+   * The largest size Correos has been seen to accept, from settings. 0 means
+   * nothing is known and the full `MAX_BATCH` is worth trying; 1 means one
+   * request per parcel.
+   */
+  batchSize?: number;
   /** Injected for tests. Defaults to global fetch. */
   fetchImpl?: typeof fetch;
 }
@@ -128,6 +191,15 @@ export interface BatchLookupResult {
   requests: number;
   /** Why the batch format was rejected, when it was. Null when it worked. */
   batchDiagnosis: string | null;
+  /**
+   * The largest size that actually worked in this run, for settings to keep.
+   *
+   * 1 means one request per parcel. 0 means nothing was learnt — not
+   * configured, nothing to look up, or the deadline arrived first — and the
+   * caller must leave the stored size alone rather than write a verdict that
+   * was never reached.
+   */
+  batchSize: number;
 }
 
 export class TrackpubClient {
@@ -141,6 +213,24 @@ export class TrackpubClient {
   private nextSlot = 0;
   private batchMode: BatchMode;
   private lastDiagnosis: string | null = null;
+  /**
+   * The size to try next, and the largest that has worked.
+   *
+   * `batchLimit` only ever comes DOWN during a run: the ladder halves it on a
+   * refusal, so once 37 has been refused this run does not go back to asking
+   * for 75 on the next chunk. `provenSize` only ever goes UP, and is what gets
+   * written back to settings.
+   */
+  private batchLimit: number;
+  private provenSize = 0;
+  /**
+   * A refusal happened, so the size came DOWN in this run.
+   *
+   * It decides whether the caller may lower the remembered size. Without it, a
+   * quiet run that only had six parcels to ask about would write 6 back as the
+   * largest size that works and undo everything the ladder learnt.
+   */
+  private narrowedDown = false;
 
   constructor(opts: TrackpubOptions = {}) {
     // `envOr`, not `??`: an empty CORREOS_TRACKPUB_BASE_URL made this `''`,
@@ -155,6 +245,16 @@ export class TrackpubClient {
     this.tokens = opts.tokenProvider ?? correosToken();
     this.fetchImpl = opts.fetchImpl ?? ((...args) => fetch(...args));
     this.batchMode = opts.batchMode ?? 'unknown';
+    // A remembered size of 1 is a real answer — one request per parcel — and
+    // has to survive, so the fallback is on 0/undefined rather than on falsy.
+    //
+    // `provenSize` is deliberately NOT seeded from it. It means "a size this
+    // run demonstrated", and a size handed in has not been demonstrated by
+    // anything yet — least of all on the daily probe, where the whole point is
+    // that it might be refused.
+    const remembered = opts.batchSize ?? 0;
+    this.batchLimit = remembered > 0 ? Math.min(MAX_BATCH, remembered) : MAX_BATCH;
+    if (this.batchLimit === 1) this.batchMode = 'single';
   }
 
   private get clientId(): string {
@@ -177,6 +277,18 @@ export class TrackpubClient {
 
   get mode(): BatchMode { return this.batchMode; }
   get diagnosis(): string | null { return this.lastDiagnosis; }
+  /**
+   * The largest size this run actually demonstrated, or 0 if nothing was.
+   *
+   * It is a floor, not a ceiling: a run with six parcels to ask about proves
+   * six works and says nothing about eighteen. Only `narrowed` licenses the
+   * caller to lower a remembered size.
+   */
+  get batchSize(): number { return this.provenSize; }
+  /** A refusal lowered the size in this run, so a smaller size is the truth. */
+  get narrowed(): boolean { return this.narrowedDown; }
+  /** The size the next request will ask for. Exposed for the tests. */
+  get limit(): number { return this.batchLimit; }
 
   /**
    * Take a mode from stored settings.
@@ -224,7 +336,25 @@ export class TrackpubClient {
    * error. A code the caller does not find in the map is a bug in this method,
    * not a parcel with no news.
    */
-  async lookupMany(codes: readonly string[], opts: { deadline?: number } = {}): Promise<BatchLookupResult> {
+  async lookupMany(
+    codes: readonly string[],
+    opts: {
+      deadline?: number;
+      /**
+       * Called with the running count of codes answered, after each request.
+       *
+       * This exists for the progress bar, and it has to be here rather than in
+       * the caller's loop: the caller cannot report anything until
+       * `lookupMany` returns, and `lookupMany` is where all the time goes. The
+       * bar sat at "0 of 12" for eight seconds and then jumped to 100%,
+       * because that is exactly when the caller found out.
+       *
+       * Deliberately a count of codes ANSWERED rather than of requests made —
+       * one request can answer eighteen parcels, and the bar is about parcels.
+       */
+      onAnswered?: (answered: number) => void | Promise<void>;
+    } = {},
+  ): Promise<BatchLookupResult> {
     const wanted = [...new Set(codes.map((c) => c.trim().toUpperCase()).filter(Boolean))];
     const byCode = new Map<string, LookupResult>();
     const settled = (): BatchLookupResult => ({
@@ -233,6 +363,7 @@ export class TrackpubClient {
       mode: this.batchMode,
       requests,
       batchDiagnosis: this.lastDiagnosis,
+      batchSize: this.provenSize,
     });
 
     let requests = 0;
@@ -248,31 +379,69 @@ export class TrackpubClient {
     // and a budget that can only be checked after all of them is not a budget.
     const outOfTime = () => opts.deadline !== undefined && Date.now() >= opts.deadline;
 
-    for (const chunk of chunksOf(wanted)) {
+    /*
+     * Re-chunked on every pass, because the batch limit can come DOWN mid-run.
+     *
+     * When Correos refuses a batch, `runCommaChunk` halves the limit and
+     * returns WITHOUT answering those codes; this loop then re-splits whatever
+     * is still unanswered at the new, smaller size and tries again. That is
+     * the ladder: 75 → 37 → 18 → 9 → 4 → 2, and a refused 2 means one request
+     * per parcel.
+     *
+     * It terminates because each pass either answers a code or lowers the
+     * limit, and the limit is halved from the length of a chunk that was
+     * refused — so it strictly decreases and bottoms out at the single path.
+     * The `progress` check below is the belt to that braces: a pass that does
+     * neither stops, rather than spinning against a gateway that is down.
+     */
+    for (;;) {
       if (outOfTime()) break;
 
-      if (this.batchMode === 'single' || chunk.length === 1) {
-        requests += await this.runSingles(chunk, byCode, outOfTime);
-        continue;
+      const left = wanted.filter((c) => !byCode.has(c));
+      if (!left.length) break;
+
+      const limitBefore = this.batchLimit;
+      const answeredBefore = byCode.size;
+
+      for (const chunk of chunksOf(left, this.batchLimit)) {
+        if (outOfTime()) break;
+
+        if (this.batchMode === 'single' || chunk.length === 1) {
+          requests += await this.runSingles(chunk, byCode, outOfTime, opts.onAnswered);
+          continue;
+        }
+
+        requests += await this.runCommaChunk(chunk, byCode, outOfTime, opts.onAnswered);
+        await opts.onAnswered?.(byCode.size);
+
+        // The limit just fell. Stop splitting at a size already known to be
+        // refused and come round again at the smaller one.
+        if (this.batchLimit < limitBefore) break;
       }
 
-      requests += await this.runCommaChunk(chunk, byCode, outOfTime);
+      const progress = byCode.size > answeredBefore || this.batchLimit < limitBefore;
+      if (!progress) break;
     }
 
     return settled();
   }
 
   /**
-   * One comma-separated attempt at a chunk, with the fallback.
+   * One comma-separated attempt at a chunk, narrowing rather than giving up.
    *
    * Each code is encoded on its own and then joined: encoding the joined string
    * would turn the commas into %2C and ask Correos about one parcel with a very
    * strange name.
+   *
+   * On a refusal this does NOT answer the codes. It halves the limit and
+   * returns, and `lookupMany` re-splits them at the smaller size — which is
+   * what turns one refusal into a ladder instead of a permanent downgrade.
    */
   private async runCommaChunk(
     chunk: string[],
     byCode: Map<string, LookupResult>,
     outOfTime: () => boolean,
+    onAnswered?: (answered: number) => void | Promise<void>,
   ): Promise<number> {
     const path = `/search/${chunk.map((c) => encodeURIComponent(c)).join(',')}`;
     const proven = this.batchMode === 'comma';
@@ -282,8 +451,8 @@ export class TrackpubClient {
 
     if (!res.ok) {
       // Rate limited or their side is unwell: nothing to do with the format.
-      // Report it for the whole chunk and leave the mode alone, so the next run
-      // still gets to use batches.
+      // Report it for the whole chunk and leave the limit alone, so the next
+      // run still gets to use batches.
       if (res.retryable) {
         for (const code of chunk) byCode.set(code, res);
         return requests;
@@ -303,9 +472,14 @@ export class TrackpubClient {
         return requests;
       }
 
-      this.fallBack(`a batch of ${chunk.length} was refused with ${res.status ?? 'a transport error'}`
-        + ` (${res.error})`);
-      return requests + await this.runSingles(chunk, byCode, outOfTime);
+      return requests + await this.narrow(
+        chunk,
+        byCode,
+        outOfTime,
+        `a batch of ${chunk.length} was refused with ${res.status ?? 'a transport error'}`
+          + ` (${res.error})`,
+        onAnswered,
+      );
     }
 
     const outcome = normalisePayload(res.body, 'poll');
@@ -314,28 +488,33 @@ export class TrackpubClient {
 
     if (missing.length === chunk.length) {
       // A 200 that mentions none of the codes we asked about is not an answer
-      // about those parcels, whatever else it contains. Ask individually.
+      // about those parcels, whatever else it contains.
       //
       // But do NOT conclude the format is broken if we have already seen it
       // work. A whole chunk can legitimately come back empty: the sweep queues
       // parcels in `created`, which is a run of freshly printed labels Correos
       // has not scanned yet, and none of those codes exists on their side.
-      // Downgrading on that would turn fifty requests a run into five
-      // thousand, permanently, against a gateway that rate-limits — and the
-      // trigger would be a perfectly normal import.
-      if (!proven) {
-        this.fallBack(`a batch of ${chunk.length} came back without any of the codes it asked about`);
-      }
-      return requests + await this.runSingles(chunk, byCode, outOfTime);
+      // Narrowing on that would turn fifty requests a run into five thousand,
+      // and the trigger would be a perfectly normal import.
+      if (proven) return requests + await this.runSingles(chunk, byCode, outOfTime, onAnswered);
+
+      return requests + await this.narrow(
+        chunk,
+        byCode,
+        outOfTime,
+        `a batch of ${chunk.length} came back without any of the codes it asked about`,
+        onAnswered,
+      );
     }
 
-    // At least one code came back keyed correctly, so the format works.
+    // At least one code came back keyed correctly, so this size works.
     if (this.batchMode !== 'comma') {
       this.batchMode = 'comma';
       this.lastDiagnosis = null;
     }
+    this.provenSize = Math.max(this.provenSize, chunk.length);
 
-    // Keep what the batch did tell us, whatever we decide about the format.
+    // Keep what the batch did tell us, whatever we decide about the size.
     for (const code of chunk) {
       if (!covered.has(code)) continue;
       // Same as the single path: a code Correos answered with a non-zero
@@ -345,38 +524,77 @@ export class TrackpubClient {
     }
 
     // More than half missing from a format we trust is a regression, not a
-    // handful of unknown codes. Say so, and fall back for the rest of the run —
-    // but only re-ask the ones we did not get, not the whole chunk.
+    // handful of unknown codes. Narrow for the rest of the run — but only
+    // re-ask the ones we did not get, not the whole chunk.
     if (missing.length > chunk.length / 2) {
-      this.fallBack(`a batch of ${chunk.length} covered only ${chunk.length - missing.length} of them`);
+      return requests + await this.narrow(
+        missing,
+        byCode,
+        outOfTime,
+        `a batch of ${chunk.length} covered only ${chunk.length - missing.length} of them`,
+        onAnswered,
+      );
     }
 
     // The few that were left out get asked about individually. That is what
     // distinguishes "Correos has never heard of it" from "the response dropped
     // it", and it is the difference between a correct 404 and a parcel quietly
     // marked as checked.
-    if (missing.length) requests += await this.runSingles(missing, byCode, outOfTime);
+    if (missing.length) requests += await this.runSingles(missing, byCode, outOfTime, onAnswered);
 
     return requests;
+  }
+
+  /**
+   * A refused size: halve it and leave these codes for the next pass.
+   *
+   * The one case that cannot be halved is a refused `MIN_BATCH`, because the
+   * next size down IS one request per parcel — so that, and only that, is what
+   * sets the single mode the old code reached on the first refusal.
+   *
+   * Returns the requests it made, which is none unless it went single.
+   */
+  private async narrow(
+    codes: string[],
+    byCode: Map<string, LookupResult>,
+    outOfTime: () => boolean,
+    why: string,
+    onAnswered?: (answered: number) => void | Promise<void>,
+  ): Promise<number> {
+    const next = halve(codes.length);
+
+    this.narrowedDown = true;
+
+    if (next >= MIN_BATCH) {
+      this.batchLimit = Math.min(this.batchLimit, next);
+      this.lastDiagnosis = `${why} — trying ${next} per request`;
+      // Deliberately answers nothing: `lookupMany` re-splits these at `next`.
+      return 0;
+    }
+
+    this.batchMode = 'single';
+    this.batchLimit = 1;
+    this.provenSize = 1;
+    this.lastDiagnosis = `${why} — falling back to one request per parcel`;
+    return this.runSingles(codes, byCode, outOfTime, onAnswered);
   }
 
   private async runSingles(
     codes: string[],
     byCode: Map<string, LookupResult>,
     outOfTime: () => boolean,
+    onAnswered?: (answered: number) => void | Promise<void>,
   ): Promise<number> {
     let requests = 0;
     for (const code of codes) {
       if (outOfTime()) break;
       byCode.set(code, await this.lookup(code));
       requests += 1;
+      // Per code, because on this path one code IS one request — and this is
+      // the path production is on.
+      await onAnswered?.(byCode.size);
     }
     return requests;
-  }
-
-  private fallBack(why: string): void {
-    this.batchMode = 'single';
-    this.lastDiagnosis = `${why} — falling back to one request per parcel`;
   }
 
   /* ------------------------------------------------------------------ http */
@@ -406,6 +624,35 @@ export class TrackpubClient {
             Authorization: `Bearer ${token.token}`,
             Accept: 'application/json',
           },
+          /*
+           * `cache: 'no-store'` IS LOAD-BEARING, AND THIS IS THE LINE WHOSE
+           * ABSENCE BROKE TRACKING FOR A DAY.
+           *
+           * Next's App Router patches global `fetch`. A GET with no cache
+           * option, called from inside a route handler, goes into the
+           * on-disk Data Cache — and Next stamped this one
+           * `revalidate: 31536000`, a year. So the three-hourly cron asked
+           * Correos once, and every run after that read
+           * `.next/cache/fetch-cache/<hash>` instead of making a request at
+           * all. Six runs in a row reported "asked 201, stored 0" while
+           * Correos had hundreds of events nobody could see.
+           *
+           * Two details made it hard to spot. The route already exports
+           * `dynamic = 'force-dynamic'`, which governs rendering and did NOT
+           * stop the fetch being cached. And the bearer token is part of the
+           * cache key, so a run that happened to mint a fresh token missed
+           * the cache and did get real data — which is why it looked
+           * intermittent rather than broken.
+           *
+           * Manual Refresh was never affected: it is a POST server action,
+           * and Next does not cache those. That is the whole of why the
+           * button worked while the cron did not.
+           *
+           * There is no case in which a cached answer from Correos is wanted.
+           * Asking where a parcel is and being handed yesterday's answer is
+           * not an optimisation.
+           */
+          cache: 'no-store',
           signal: AbortSignal.timeout(30_000),
         });
       } catch (err) {
@@ -491,19 +738,25 @@ export class TrackpubClient {
 export const NEVER_HEARD_OF_IT = 'Correos has never heard of this code';
 
 /**
- * Split codes into requests: at most MAX_BATCH of them, and at most
+ * Split codes into requests: at most `limit` of them, and at most
  * MAX_PATH_BYTES of path. A single code always gets its own chunk even if it
  * is longer than the budget — refusing to ask about a parcel because its code
  * is long would be worse than a long URL.
+ *
+ * `limit` is what the halving ladder lowers. It is not the same thing as the
+ * path cap, and on production it was the path cap that decided the size: 1,800
+ * bytes of 24-byte codes is about 75, which is why a batch of 75 — not 100 —
+ * is the one Correos refused.
  */
-export function chunksOf(codes: readonly string[]): string[][] {
+export function chunksOf(codes: readonly string[], limit: number = MAX_BATCH): string[][] {
   const out: string[][] = [];
   let chunk: string[] = [];
   let bytes = 0;
+  const cap = Math.max(1, Math.min(MAX_BATCH, Math.floor(limit)));
 
   for (const code of codes) {
     const cost = encodeURIComponent(code).length + 1; // +1 for the comma
-    const full = chunk.length >= MAX_BATCH || (chunk.length > 0 && bytes + cost > MAX_PATH_BYTES);
+    const full = chunk.length >= cap || (chunk.length > 0 && bytes + cost > MAX_PATH_BYTES);
     if (full) { out.push(chunk); chunk = []; bytes = 0; }
     chunk.push(code);
     bytes += cost;

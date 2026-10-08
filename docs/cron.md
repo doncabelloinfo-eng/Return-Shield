@@ -11,7 +11,7 @@ can occasionally fire twice, and two runs can overlap. Three mechanisms in
 | Route | UTC schedule | `maxDuration` | Notes |
 |---|---|---|---|
 | `escalation-tick` | `*/30 * * * *` | 60 | The heartbeat the engine banner is calibrated against. |
-| `reconcile` | `10 */3 * * *` | 300 | Batches of 100 codes, urgent parcels first. |
+| `reconcile` | `10 * * * *` | 300 | Only the parcels that are due, urgent first. The batch size is learnt rather than fixed. |
 | ~~`push-drain`~~ | **not scheduled** | 60 | Taken off the schedule: push is not configured and is not being turned on, so it recorded "push not configured" every five minutes. Route and receiver intact. |
 | ~~`push-heartbeat`~~ | **not scheduled** | 30 | Same. |
 | `shopify-backfill` | `15 * * * *` | 120 | |
@@ -95,6 +95,30 @@ A job that threw used to return 200 with an empty detail, so Vercel's cron log
 showed green on the day it failed. It now returns 500. Vercel does not retry on
 500, so this changes nothing about the schedule — it is purely about the log
 telling the truth.
+
+## The hourly check does only what is due
+
+`reconcile` runs every hour at minute 10 and asks about only the parcels the
+twelve-hour rule says are due — every three hours for the four states where
+being out of date costs something. `lib/recheck.ts` owns the rule and
+`RECHECK_HOURS` / `URGENT_RECHECK_HOURS` are the two numbers.
+
+It used to run every three hours and ask about every live parcel. At 201 parcels
+and one request each that was 114 seconds of a function being alive, to learn
+that 190 of them had not moved — and Vercel bills memory for the whole time a
+function is alive, so the bill is wall-clock rather than work done.
+
+Most hours now have a handful of parcels due or none at all, and a run with
+nothing due ends in about forty milliseconds without minting a token or making a
+request. It is recorded as a skip, so it still counts as a heartbeat for the
+engine-health banner.
+
+Hourly is also what makes the three-hour promise keepable: on a three-hourly
+schedule one dropped invocation breaks it.
+
+**The Settings screen shows the arithmetic** — the batch size, the throughput
+measured from recent runs, the live and overdue counts, and how many minutes the
+checks kept the server alive today.
 
 ## The Refresh button is the same sweep, not a second one
 

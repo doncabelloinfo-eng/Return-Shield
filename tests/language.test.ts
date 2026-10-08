@@ -409,7 +409,7 @@ describe('the new tracker wordings', () => {
     ['Envío clasificado en centro logístico', 'in_transit'],
     ['En tránsito', 'in_transit'],
     ['Llegada a la oficina de destino', 'in_transit'],
-    ['Alta en unidad de reparto', 'in_transit'],
+    ['Alta en unidad de reparto', 'out_for_delivery'],
     ['En reparto', 'out_for_delivery'],
     ['A disposición del destinatario', 'at_office'],
     ['Entregado', 'delivered'],
@@ -428,8 +428,21 @@ describe('the new tracker wordings', () => {
     expect(mapCorreosEvent(null, 'A disposición del destinatario')).toBe('at_office');
   });
 
-  it('does not treat booking into a delivery unit as being out with the postman', () => {
-    expect(mapCorreosEvent(null, 'Alta en unidad de reparto')).toBe('in_transit');
+  it('treats booking into a delivery unit as being out for delivery', () => {
+    /*
+     * This asserted `in_transit` until Correos settled it: their own tracker
+     * files "Alta en la unidad de reparto" under OUT FOR DELIVERY, with the
+     * text "Your shipment has arrived at the unit responsible for its
+     * delivery". Our reading of the words was that the depot had booked it in;
+     * theirs is that it is with the people who will deliver it, and theirs is
+     * the classification the customer sees.
+     *
+     * Both spellings, because the feed sends one and the public tracker the
+     * other, and they used to disagree with each other.
+     */
+    expect(mapCorreosEvent(null, 'Alta en unidad de reparto')).toBe('out_for_delivery');
+    expect(mapCorreosEvent(null, 'Alta en la unidad de reparto')).toBe('out_for_delivery');
+    expect(mapCorreosEvent('G01L010V', 'anything at all')).toBe('out_for_delivery');
     expect(mapCorreosEvent(null, 'En reparto')).toBe('out_for_delivery');
   });
 

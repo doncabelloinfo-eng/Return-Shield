@@ -67,15 +67,14 @@ const REAL = [
  *   succeeded. Reading it as a failure would start the post-failure ladder on
  *   parcels that were delivered.
  *
- *   "Alta en la unidad de reparto" differs by one word from
- *   `'alta en unidad de reparto'`, which IS mapped — from Correos' public
- *   tracker rather than from their feed. They must stay apart.
+ *   "Alta en la unidad de reparto" used to be on this list, one word away from
+ *   a spelling we DID map, and the two disagreed. Correos settled it: both are
+ *   `out_for_delivery` now, and the pair is tested below rather than here.
  */
 const IN_REVIEW = [
   { code: 'H01R424V', desc: 'Realizado intento de entrega' },
   { code: 'H06P010V', desc: 'En proceso de entrega' },
   { code: 'H06P050V', desc: 'En proceso de entrega' },
-  { code: 'G01L010V', desc: 'Alta en la unidad de reparto' },
   { code: 'M010090R', desc: 'Envío a estacionar' },
   { code: 'M01E020R', desc: 'Envío a estacionar' },
   { code: 'M01E320R', desc: 'Estacionado' },
@@ -191,12 +190,24 @@ describe('the codes read out of production', () => {
     }
   });
 
-  it('keeps the two "alta en … unidad de reparto" spellings apart', () => {
-    // One word of difference, and deliberately different answers: the mapped
-    // spelling came off Correos' public tracker, this one is what their API
-    // sends and is still a question for them.
-    expect(mapCorreosEvent(null, 'Alta en unidad de reparto', null)).toBe('in_transit');
-    expect(mapCorreosEvent(null, 'Alta en la unidad de reparto', null)).toBeNull();
+  it('gives both "alta en … unidad de reparto" spellings the same answer', () => {
+    /*
+     * These used to disagree, and a round was spent explaining why they had to:
+     * the shorter spelling came off Correos' public web tracker and was read as
+     * `in_transit`, the longer one is what their API sends and was left in the
+     * review queue. One event, two keys, two answers.
+     *
+     * Correos' own tracker groups it under OUT FOR DELIVERY — "Your shipment
+     * has arrived at the unit responsible for its delivery" — so both spellings
+     * and the code now land there together. The reason this is a test and not
+     * just a table entry is that the two keys are one word apart and nothing
+     * else would notice them drifting again.
+     */
+    expect(mapCorreosEvent(null, 'Alta en unidad de reparto', null)).toBe('out_for_delivery');
+    expect(mapCorreosEvent(null, 'Alta en la unidad de reparto', null)).toBe('out_for_delivery');
+    expect(matchCorreosEvent('G01L010V', 'whatever they send next', null))
+      .toEqual({ state: 'out_for_delivery', via: 'code' });
+    expect(needsReview('G01L010V', 'Alta en la unidad de reparto', 'EN ENTREGA')).toBe(false);
   });
 });
 

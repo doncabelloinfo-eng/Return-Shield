@@ -89,6 +89,12 @@ async function readPage(
   try {
     res = await fetchImpl(url, {
       headers: { 'X-Shopify-Access-Token': token, Accept: 'application/json' },
+      // A GET from inside a route handler, which is exactly the shape that
+      // put a year-old Correos answer in the Data Cache — see the note in
+      // lib/carriers/correos/trackpub.ts. The hourly backfill runs through
+      // here, so without this it would eventually stop seeing new orders in
+      // the same silent way.
+      cache: 'no-store',
       signal: AbortSignal.timeout(25_000),
     });
   } catch (err) {

@@ -3,9 +3,11 @@ import { getDb } from '@/db';
 import { eventReviewQueue, postcodeStats, stores } from '@/db/schema';
 import { ShopifyPull } from '@/components/ShopifyPull';
 import { IntegrationsPanel } from '@/components/IntegrationsPanel';
+import { SweepPanel } from '@/components/SweepPanel';
 import { JobRunsPanel } from '@/components/JobRunsPanel';
 import { integrationStatus } from '@/lib/integrations';
 import { jobHealth } from '@/lib/engine-health';
+import { sweepCapacity, sweepSilence } from '@/lib/sweep-health';
 import { getSetting } from '@/lib/settings';
 import { Card, PageHeading, Bilingual } from '@/components/ui';
 import { StoragePanel } from '@/components/StoragePanel';
@@ -30,7 +32,9 @@ export const runtime = 'nodejs';
  * chased correctly.
  */
 export default async function SettingsPage() {
-  const [watched, review, integrations, jobs, batchMode, bytes, shopifyStores] = await Promise.all([
+  const [
+    watched, review, integrations, jobs, batchMode, bytes, shopifyStores, capacity, silence,
+  ] = await Promise.all([
     getDb().select().from(postcodeStats).where(eq(postcodeStats.watch, true)).orderBy(desc(postcodeStats.failRate)),
     getDb().select().from(eventReviewQueue)
       .where(isNull(eventReviewQueue.resolvedAt))
@@ -42,6 +46,8 @@ export default async function SettingsPage() {
     getDb().select({ key: stores.key, name: stores.name }).from(stores)
       .where(and(eq(stores.platform, 'shopify'), eq(stores.active, true)))
       .orderBy(stores.name),
+    sweepCapacity(),
+    sweepSilence(),
   ]);
 
   const windowDays = retentionDays();
@@ -55,6 +61,10 @@ export default async function SettingsPage() {
 
       <div className="mt-[18px]">
         <IntegrationsPanel integrations={integrations} batchMode={batchMode} />
+      </div>
+
+      <div className="mt-[22px]">
+        <SweepPanel capacity={capacity} silence={silence} />
       </div>
 
       <div className="mt-[22px]">

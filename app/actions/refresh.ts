@@ -83,7 +83,11 @@ export async function refreshFromCorreos(): Promise<RefreshResult> {
     // Scheduled jobs panel, the engine-health heartbeat and the five-minute
     // guard all see it without being taught about a second kind of sweep.
     const outcome = await runJob('reconcile', async () => {
-      const result = await reconcile({ budgetMs: manualSweepBudgetMs() });
+      // No `dueOnly`: a person pressing Refresh is asking about everything,
+      // and "nothing was due" is not an answer to that. `manual` is what
+      // labels the progress bar "Checking with Correos" rather than
+      // "Automatic check".
+      const result = await reconcile({ budgetMs: manualSweepBudgetMs(), manual: true });
       return { ...result, detail: { ...result.detail, manual: true } };
     });
 
@@ -154,7 +158,7 @@ export async function sweepNewParcels(): Promise<SweepResult> {
 
   try {
     const outcome = await runJob('reconcile', async () => {
-      const result = await reconcile({ onlyUnswept: true, budgetMs: manualSweepBudgetMs() });
+      const result = await reconcile({ onlyUnswept: true, budgetMs: manualSweepBudgetMs(), manual: true });
       return { ...result, detail: { ...result.detail, manual: true } };
     });
     revalidatePath('/', 'layout');

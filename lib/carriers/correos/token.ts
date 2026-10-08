@@ -183,6 +183,11 @@ export class CorreosTokenProvider {
           Accept: 'application/json',
         },
         body: body.toString(),
+        // A POST is not cacheable, so this is belt and braces rather than a
+        // fix — but a token is the last thing that should ever be served from
+        // a cache, and the guard test holds every outbound call to one rule
+        // rather than asking each reader to work out which ones are exempt.
+        cache: 'no-store',
         signal: AbortSignal.timeout(15_000),
       });
     } catch (err) {

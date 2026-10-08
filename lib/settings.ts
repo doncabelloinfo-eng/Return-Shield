@@ -37,6 +37,62 @@ export interface AppSettings {
    * the operator could not see which mode is in use.
    */
   correosBatchMode: 'unknown' | 'comma' | 'single';
+  /**
+   * The largest number of codes per request Correos has actually accepted.
+   *
+   * 0 = never established, 1 = one parcel per request. Stored rather than
+   * re-probed because probing costs a refused request, and because the
+   * operator can see on the Settings screen what the sweep is working with.
+   *
+   * It replaces a verdict that used to be binary: a refused batch dropped
+   * straight to one request per parcel, for good. On production a batch of 75
+   * was refused with an HTML 403, so every one of 201 parcels got its own
+   * request — and nobody knew whether 37 would have worked.
+   */
+  correosBatchSize: number;
+  /**
+   * When a larger batch was last tried, ISO. Empty means never.
+   *
+   * A gateway's limit is not a law of nature: it changes when Correos change
+   * it, and a size written down for good would never be revisited. So once a
+   * day the sweep tries double what it knows works, and if that is refused it
+   * costs one request and goes back to the known size.
+   */
+  correosBatchProbedAt: string;
+  /**
+   * What the sweep running right now has got through, for the progress bar.
+   *
+   * In settings rather than a table of its own: it is one row that is
+   * overwritten, never queried across, and this way the progress bar needed no
+   * migration. See lib/sweep-progress.ts, which owns the shape.
+   */
+  sweepProgress: SweepProgress | null;
+}
+
+/**
+ * One sweep's progress. Written by `reconcile` at most every two seconds and
+ * read by the poll route, so both the manual Refresh and the hourly cron are
+ * visible to anyone with the app open. See lib/sweep-progress.ts.
+ */
+export interface SweepProgress {
+  /** Parcels this run set out to check. */
+  total: number;
+  /** Parcels it has had an answer about. */
+  checked: number;
+  /** Of those, how many Correos told us something new about. */
+  changed: number;
+  /** ISO. When the run started. */
+  startedAt: string;
+  /** ISO. When this row was last written — how the reader spots a dead run. */
+  updatedAt: string;
+  /** A person pressed Refresh, rather than the hourly cron. */
+  manual: boolean;
+  /** The run has finished. The final line stays on screen for a while. */
+  done: boolean;
+  /** Set when it stopped at its budget, with however many were left. */
+  stoppedEarly?: string;
+  /** Wall-clock milliseconds, on the final write. */
+  tookMs?: number;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -48,6 +104,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   watchFailRateMultiple: 2,
   demoClockOffsetMinutes: 0,
   correosBatchMode: 'unknown',
+  correosBatchSize: 0,
+  correosBatchProbedAt: '',
+  sweepProgress: null,
 };
 
 export async function getSettings(): Promise<AppSettings> {

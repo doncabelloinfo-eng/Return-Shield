@@ -205,13 +205,22 @@ describe('the schedule in vercel.json', () => {
     expect(daily).toHaveLength(3);
   });
 
-  it('sweeps Correos every three hours', () => {
-    // 5,000 live parcels must each be refreshed at least every 12 hours. Every
-    // three, in batches of 100, is about 50 requests a run.
+  it('sweeps Correos every hour, asking only about what is due', () => {
+    /*
+     * It used to run every three hours and ask about every live parcel on
+     * every run. At 201 parcels and one request each that was 114 seconds of a
+     * function being alive, every three hours, to learn that 190 of them had
+     * not moved — and Vercel bills the time a function is alive, not the work
+     * it does.
+     *
+     * Hourly is also what makes the three-hour promise for urgent parcels
+     * keepable: on a three-hourly schedule one dropped invocation breaks it.
+     * See lib/recheck.ts.
+     */
     const config = JSON.parse(readFileSync('vercel.json', 'utf8')) as {
       crons: { path: string; schedule: string }[];
     };
-    expect(config.crons.find((c) => c.path === '/api/cron/reconcile')?.schedule).toBe('10 */3 * * *');
+    expect(config.crons.find((c) => c.path === '/api/cron/reconcile')?.schedule).toBe('10 * * * *');
   });
 });
 
