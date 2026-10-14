@@ -1088,14 +1088,25 @@ trusted, each hunting one class of defect, and each finding verified by trying
 to refute it. Six real defects, two of which would have made the round
 pointless.
 
-**The error page still only tried once.** `BusyDatabase`'s effect listed
-`[onRetry]` as its dependencies and re-armed itself by calling `setTick`. A
-state update does not re-run an effect whose dependencies have not changed,
-and `onRetry` never changes identity, so exactly one timer was ever armed: the
-page tried at three seconds and then said "Trying again…" for ever while doing
-nothing. The bug the round existed to fix, reproduced by the fix. `tick` is now
-a dependency, so the schedule advances whether or not React remounts the
-fallback.
+**The error page may still only have tried once, and this one is not settled.**
+`BusyDatabase`'s effect listed `[onRetry]` as its dependencies and re-armed
+itself by calling `setTick`. A state update does not re-run an effect whose
+dependencies have not changed, and `onRetry` never changes identity — so if the
+boundary reconciles its fallback as an update, exactly one timer is ever armed
+and the page says "Trying again…" for ever while doing nothing.
+
+Two reviewers reached that conclusion independently; the verification pass
+refuted it, citing `forceUnmountCurrentAndReconcile` in React 18's
+`finishClassComponent`, which force-unmounts and remounts a class boundary's
+fallback on every capture — in which case the module-scope `attempts` carries
+the schedule and `[onRetry]` was enough. Both readings are plausible and
+nothing here can run a browser to decide.
+
+`tick` is a dependency now, because it works under both. The redundancy costs
+at most one extra refresh per attempt if the component is still mounted while
+the previous attempt is in flight — eight over half a minute, from a tab
+already showing an error. Guessing the other way costs a page that never comes
+back, which is the complaint that started this round.
 
 **Two of the four layout reads could not retry at all.** `engineHealth` and
 `sweepStatus` are wrapped in `perRequest`, which is React's `cache()` — and

@@ -41,15 +41,38 @@ export function BusyDatabase({
   onRetry: () => void;
 }) {
   /*
-   * `tick` IS A DEPENDENCY, and that is the whole mechanism.
+   * `tick` IS A DEPENDENCY, and it is a deliberate belt AND braces.
    *
-   * The timer below calls `setTick` to schedule the next attempt — but a state
-   * update does not re-run an effect whose dependency list has not changed,
-   * and `onRetry` never changes identity (it is a `useCallback` over a stable
-   * router and a stable `reset`). With `[onRetry]` alone, exactly ONE timer
-   * was ever armed: the page tried once at three seconds, and then said
-   * "Trying again…" for ever while doing nothing — which is the bug this file
-   * exists to fix, reproduced by the fix itself.
+   * There are two ways this schedule can advance after a retry fails, and
+   * which one React actually takes is the one thing in this file that was not
+   * settled by reading it:
+   *
+   *   · A REMOUNT. `finishClassComponent` in React 18 calls
+   *     `forceUnmountCurrentAndReconcile` when a class boundary captures with
+   *     a committed child — it deletes the fallback and mounts it fresh "even
+   *     if the type and key are the same". Next's ErrorBoundaryHandler is such
+   *     a boundary, so each failed retry would give this component a fresh
+   *     mount, its effect would run again, and the module-scope `attempts`
+   *     below would carry the schedule forward. That is what those two
+   *     module-level values are for.
+   *
+   *   · THIS EFFECT RE-RUNNING. If the boundary instead reconciles the
+   *     fallback as an update — which is what a transition that never commits
+   *     its intermediate tree would do — no remount happens, and then a
+   *     dependency list of `[onRetry]` alone arms exactly ONE timer, ever:
+   *     the page tries once at three seconds and then says "Trying again…"
+   *     for ever while doing nothing. Which is the bug this file exists to
+   *     fix, reproduced by the fix.
+   *
+   * With `tick` in the list it works under both, and the cost of the
+   * redundancy is small and bounded: if the component is still mounted when
+   * the next attempt is due while the previous one is still in flight, a
+   * second refresh is dispatched — at most eight over half a minute, from a
+   * tab already sitting on an error page. The cost of guessing wrong the other
+   * way is a page that never comes back, twice reported.
+   *
+   * It is settled by watching a browser, not by reading: stop Postgres, load a
+   * page, start Postgres, and see whether the screen returns on its own.
    */
   const [tick, setTick] = useState(0);
   const [trying, setTrying] = useState(true);
@@ -67,8 +90,9 @@ export function BusyDatabase({
     const timer = setTimeout(() => {
       attempts += 1;
       lastAt = Date.now();
-      // Re-render so this effect runs again and schedules the next attempt. If
-      // the retry worked, the boundary is gone and so is the timer.
+      // Re-render, so that if React did NOT remount this component the effect
+      // runs again and arms the next attempt. If the retry worked, the
+      // boundary is gone and so is this timer.
       setTick((n) => n + 1);
       onRetry();
     }, delay);
