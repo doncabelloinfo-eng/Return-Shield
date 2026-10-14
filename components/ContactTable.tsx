@@ -55,7 +55,7 @@ export function ContactTable({ rows }: { rows: ParcelListRow[] }) {
             return (
               <tr key={r.id} className="align-top hover:bg-hover">
                 <td className="border-b border-line px-3 py-[10px]">
-                  <Link href={`/parcel/${r.id}`} className="text-[13px] font-semibold text-ink underline-offset-2 hover:underline">
+                  <Link href={`/parcel/${r.id}`} prefetch={false} className="text-[13px] font-semibold text-ink underline-offset-2 hover:underline">
                     {r.customerName}
                   </Link>
                   <div className="text-[12px] text-muted">

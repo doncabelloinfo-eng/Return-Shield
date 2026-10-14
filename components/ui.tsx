@@ -110,7 +110,18 @@ export function Empty({ children, good = false }: { children: React.ReactNode; g
 }
 
 export function ParcelLink({ id, children, className }: { id: string; children: React.ReactNode; className?: string }) {
-  return <Link href={`/parcel/${id}`} className={className}>{children}</Link>;
+  /*
+   * `prefetch={false}`, here and on every other link to a parcel.
+   *
+   * Next prefetches a visible Link, so a hundred-row table quietly rendered a
+   * hundred parcel pages on the server — 290 invocations of /parcel/[id] in
+   * twelve hours against 31 views of the Parcels screen, each one a database
+   * connection out of the fifteen the whole project has. That is a large part
+   * of why pages were failing with "Application error" while somebody was
+   * only looking at a list. The parcel page renders in about 10ms when it is
+   * actually asked for.
+   */
+  return <Link href={`/parcel/${id}`} prefetch={false} className={className}>{children}</Link>;
 }
 
 /**

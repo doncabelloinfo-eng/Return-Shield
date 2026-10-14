@@ -1,5 +1,5 @@
 import { desc } from 'drizzle-orm';
-import { getDb } from '@/db';
+import { getDb, withDbRetry } from '@/db';
 import { importBatches } from '@/db/schema';
 import { fmt } from '@/lib/time';
 import { ImportScreen } from '@/components/ImportScreen';
@@ -18,8 +18,12 @@ export const runtime = 'nodejs';
  * the file name, which people rename.
  */
 export default async function ImportPage() {
-  const batches = await getDb().select().from(importBatches)
-    .orderBy(desc(importBatches.createdAt)).limit(10);
+  // One of the five queries the pooler was refusing: a read, so a refusal is
+  // worth a second try rather than an error page. See withDbRetry in db/index.ts.
+  // `async`, so what withDbRetry gets is a real Promise rather than a query
+  // builder that merely behaves like one.
+  const batches = await withDbRetry('import batches', async () => getDb().select()
+    .from(importBatches).orderBy(desc(importBatches.createdAt)).limit(10));
 
   return (
     <div className="px-4 pb-10 pt-[18px]">

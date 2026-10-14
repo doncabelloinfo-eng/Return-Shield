@@ -95,6 +95,7 @@ export function FocusCard({ row, nextIndex, total }: { row: ShipmentRow; nextInd
           <div className="flex gap-[7px]">
             <Link
               href={`/parcel/${row.id}`}
+              prefetch={false}
               className="flex-1 rounded border border-line bg-surface2 px-3 py-[9px] text-center text-[12px] font-semibold text-ink"
             >
               Open parcel

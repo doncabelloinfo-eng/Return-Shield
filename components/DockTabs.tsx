@@ -101,6 +101,7 @@ export function DockTabs({ messages, feed }: { messages: DockMessage[]; feed: Do
                     {m.linkLabel && (
                       <Link
                         href={`/parcel/${m.shipmentId}`}
+                        prefetch={false}
                         className="mt-[7px] block w-full border-t border-[#E3E8EF] pt-2 text-center text-[12px] font-semibold text-[#0E7C56]"
                       >
                         ↗ {m.linkLabel}
@@ -132,7 +133,7 @@ export function DockTabs({ messages, feed }: { messages: DockMessage[]; feed: Do
               {feed.length} updates from Correos · newest first · with what each one meant for us
             </div>
             {feed.map((e) => (
-              <Link key={e.id} href={`/parcel/${e.shipmentId}`} className="block border-b border-line py-[9px]">
+              <Link key={e.id} href={`/parcel/${e.shipmentId}`} prefetch={false} className="block border-b border-line py-[9px]">
                 <div className="flex items-baseline gap-2">
                   <span className="whitespace-nowrap font-mono text-[10.5px] text-muted" title={e.exact}>{e.when}</span>
                   <span className="text-[12px] font-medium italic leading-[1.4] text-ink">{e.desc}</span>

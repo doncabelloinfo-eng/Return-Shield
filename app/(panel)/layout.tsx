@@ -3,8 +3,8 @@ import { requireUser } from '@/lib/auth/guard';
 import { loadDemoClock, isDemoMode } from '@/lib/demo-clock';
 import { recentActivity } from '@/lib/activity';
 import { engineHealth, sweepStatus } from '@/lib/engine-health';
-import { actionable } from '@/lib/escalation/decide';
-import { loadRows } from '@/lib/views/rows';
+import { todoCount } from '@/lib/views/todo';
+import { withDbRetry } from '@/db';
 import { now } from '@/lib/clock';
 import { fmt } from '@/lib/time';
 import { TopBar } from '@/components/TopBar';
@@ -22,18 +22,26 @@ export default async function PanelLayout({ children }: { children: React.ReactN
   const user = await requireUser();
   await loadDemoClock();
 
-  // engineHealth() has to come after loadDemoClock(): in demo mode job_runs
-  // rows are stamped from the offset clock, and reading one against the system
-  // clock would make a working engine look stopped.
-  const [ticker, rows, health, sweep] = await Promise.all([
+  /*
+   * engineHealth() has to come after loadDemoClock(): in demo mode job_runs
+   * rows are stamped from the offset clock, and reading one against the system
+   * clock would make a working engine look stopped.
+   *
+   * All four are reads, so one `withDbRetry` around the lot is safe and is the
+   * cheapest place to put it: this layout wraps EVERY panel screen, so a
+   * pooler that was full for a quarter of a second now costs a beat here
+   * instead of "Application error" on whichever of these four lost the race.
+   * `todoCount` replaced `loadRows()`, which loaded every shipment in the
+   * database to produce one integer — see lib/views/todo.ts.
+   */
+  const [ticker, todo, health, sweep] = await withDbRetry('panel layout', () => Promise.all([
     recentActivity(24),
-    loadRows(),
+    todoCount(),
     engineHealth(),
     sweepStatus(),
-  ]);
+  ]));
 
   const at = now();
-  const todo = actionable(rows, at).length;
   const f = fmt(at);
 
   return (

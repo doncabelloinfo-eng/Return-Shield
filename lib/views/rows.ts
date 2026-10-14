@@ -1,5 +1,5 @@
 import { and, desc, eq, gte, inArray, sql as raw } from 'drizzle-orm';
-import { getDb } from '@/db';
+import { getDb, retryableRead } from '@/db';
 import { contactLog, offices, orders, shipments, stores, tasks } from '@/db/schema';
 import type { ShipmentState } from '@/lib/state-machine/states';
 import {
@@ -81,7 +81,9 @@ export interface ShipmentRow extends DecidableShipment {
   lastContactLine: string;
 }
 
-export async function loadRows(opts: { at?: Date } = {}): Promise<ShipmentRow[]> {
+export const loadRows = retryableRead('parcel rows', loadRowsQuery);
+
+async function loadRowsQuery(opts: { at?: Date } = {}): Promise<ShipmentRow[]> {
   const at = opts.at ?? now();
 
   const rows = await getDb().select({

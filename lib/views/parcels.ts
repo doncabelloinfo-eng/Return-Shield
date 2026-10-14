@@ -1,5 +1,5 @@
 import { sql as raw, type SQL } from 'drizzle-orm';
-import { getDb, rowsOf, at as ts } from '@/db';
+import { getDb, retryableRead, rowsOf, at as ts } from '@/db';
 import { now } from '@/lib/clock';
 import {
   daysAtOffice, exact, human, madridDaysBetween, madridMidnightUtc, workingDayCutoff,
@@ -397,7 +397,9 @@ function filters(q: string, store: string, day: { from: Date; until: Date } | nu
   return raw.join(parts, raw` AND `);
 }
 
-export async function parcelsView(opts: ParcelsQuery = {}): Promise<ParcelsView> {
+export const parcelsView = retryableRead('parcels list', parcelsViewQuery);
+
+async function parcelsViewQuery(opts: ParcelsQuery = {}): Promise<ParcelsView> {
   const at = opts.at ?? now();
   const q = (opts.q ?? '').trim();
   const store = (opts.store ?? '').trim();
@@ -456,6 +458,75 @@ export async function parcelsView(opts: ParcelsQuery = {}): Promise<ParcelsView>
     page,
     pages: Math.max(1, Math.ceil(total / PAGE_SIZE)),
     stores: rowsOf<{ name: string }>(storeResult).map((s) => s.name),
+  };
+}
+
+/**
+ * How many rows one export may carry.
+ *
+ * Not a page size — the point of the export is that it is not paged — but the
+ * line past which a download stops being a download. The brief puts it at five
+ * thousand, and the first page of the PDF says so when it bites, because a
+ * file that quietly stops at five thousand of seven looks complete.
+ */
+export const EXPORT_CAP = 5000;
+
+export interface ParcelsExport {
+  tab: ParcelTab;
+  rows: ParcelListRow[];
+  /** What the tab holds. More than `rows.length` when the cap bit. */
+  total: number;
+  capped: boolean;
+}
+
+/**
+ * The same list the screen shows, every row of it, for the file that goes to
+ * the warehouse.
+ *
+ * The operator's question is "which orders are these, with their details, so I
+ * can send them on" — and the screen cannot answer it, because it pages at a
+ * hundred and because what is on it is not a file. So this runs the SAME base
+ * query, the SAME tab predicate and the SAME search, shop and date filters,
+ * in the SAME order, without the LIMIT/OFFSET.
+ *
+ * Sharing those four things with `parcelsView` is the whole design. An export
+ * that built its own predicate would answer a slightly different question from
+ * the tab it was downloaded from, and the day those two drift is the day
+ * somebody ships against the wrong list.
+ */
+export const parcelsExport = retryableRead('parcels export', parcelsExportQuery);
+
+async function parcelsExportQuery(opts: ParcelsQuery = {}): Promise<ParcelsExport> {
+  const at = opts.at ?? now();
+  const q = (opts.q ?? '').trim();
+  const store = (opts.store ?? '').trim();
+
+  const tabId: ParcelTabId = opts.status && isParcelTab(opts.status) ? opts.status : 'all_open';
+  const cutoff = workingDayCutoff(at, 2);
+  const sameStatusCutoff = workingDayCutoff(at, 3);
+  const staleBefore = cutoffFor(at);
+  const where = predicates(cutoff, sameStatusCutoff, staleBefore);
+  const extra = filters(q, store, parseDayFilter(opts.date));
+
+  // `count(*) OVER ()` is not affected by the LIMIT, so the file can say "5000
+  // of 7214" rather than quietly stopping at five thousand.
+  const result = await getDb().execute(raw`
+    ${base()}
+    SELECT b.*, count(*) OVER () AS total_rows
+      FROM b
+     WHERE ${where[tabId]} AND ${extra}
+     ORDER BY ${orderFor(tabId)}
+     LIMIT ${EXPORT_CAP}
+  `);
+
+  const raws = rowsOf<RawParcelRow>(result);
+  const total = raws.length ? Number(raws[0].total_rows) : 0;
+
+  return {
+    tab: PARCEL_TABS.find((t) => t.id === tabId) ?? PARCEL_TABS[0],
+    rows: raws.map((r) => toRow(r, at, cutoff, sameStatusCutoff, staleBefore)),
+    total,
+    capped: total > raws.length,
   };
 }
 

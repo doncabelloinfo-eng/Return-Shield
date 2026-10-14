@@ -85,7 +85,7 @@ export function ClosuresPanel({
                     <td className="border-b border-line px-3 py-[10px]">
                       {/* Null once the window has taken the parcel. The record stays. */}
                       {r.shipmentId ? (
-                        <Link href={`/parcel/${r.shipmentId}`} className="text-[13px] font-semibold text-ink underline-offset-2 hover:underline">
+                        <Link href={`/parcel/${r.shipmentId}`} prefetch={false} className="text-[13px] font-semibold text-ink underline-offset-2 hover:underline">
                           {r.orderNumber}
                         </Link>
                       ) : (

@@ -6,6 +6,7 @@ import { ParcelsTable } from '@/components/ParcelsTable';
 import { ClosuresPanel } from '@/components/ClosuresPanel';
 import { ContactTable } from '@/components/ContactTable';
 import { Pager } from '@/components/Pager';
+import { ExportPdfButton } from '@/components/ExportPdfButton';
 import { PageHeading, Empty } from '@/components/ui';
 
 // Per-request, behind a login or a signed token, and it reads the database.
@@ -61,7 +62,20 @@ export default async function ParcelsPage({
       <div className="flex flex-wrap items-end gap-[14px]">
         <PageHeading title="Parcels" note={heading} />
         {!onClosed && (
-          <ParcelSearch stores={view.stores} current={{ q, store, date }} />
+          <>
+            <ParcelSearch stores={view.stores} current={{ q, store, date }} />
+            {/*
+              Beside the filters, because what it exports is whatever they have
+              narrowed this tab to — every row of it, not the hundred on screen.
+              Not on the closed tab: that list comes from `closures`, a
+              different table with different columns, and the operator asked for
+              this on the parcel tabs.
+            */}
+            <ExportPdfButton
+              total={view.total}
+              params={{ status: view.tab.id, q, store, date }}
+            />
+          </>
         )}
       </div>
 

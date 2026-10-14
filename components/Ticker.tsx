@@ -40,6 +40,7 @@ export function Ticker({
             {t.shipmentId ? (
               <Link
                 href={`/parcel/${t.shipmentId}`}
+                prefetch={false}
                 className="text-[12.5px] leading-[1.45] text-ink underline-offset-2 hover:underline"
               >
                 {t.text}

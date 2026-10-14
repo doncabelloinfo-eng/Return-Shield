@@ -172,7 +172,7 @@ export function CallList({ rows }: { rows: CallCard[] }) {
                     WhatsApp
                   </a>
                 )}
-                <Link href={`/parcel/${r.id}`}
+                <Link href={`/parcel/${r.id}`} prefetch={false}
                   className="rounded border border-line bg-surface2 px-3 py-[9px] text-[12px] font-semibold text-ink">
                   Open parcel
                 </Link>

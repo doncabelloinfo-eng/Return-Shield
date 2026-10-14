@@ -3,6 +3,7 @@
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useRef, useState, useTransition } from 'react';
 import { refreshFromCorreos } from '@/app/actions/refresh';
+import { nextPollDelay } from '@/lib/poll-schedule';
 import { useToast } from './Toast';
 
 /**
@@ -15,8 +16,8 @@ import { useToast } from './Toast';
  *
  * The bar is the part that was missing. A button that says "Asking Correos…"
  * for two minutes is indistinguishable from a button that has hung, so this
- * polls a small route every second and a half and draws what the sweep has
- * actually got through.
+ * polls a small route while a sweep is running and draws what it has actually
+ * got through. How often, and when not to, is lib/poll-schedule.ts.
  *
  * Three things fall out of the progress row living in the database rather than
  * in this component's state, and all three are the point:
@@ -41,18 +42,6 @@ interface Progress {
   line: string;
   done: boolean;
 }
-
-/** Fast enough to look live, slow enough that nobody notices the requests. */
-const POLL_MS = 1500;
-
-/**
- * How often to look when nothing is happening.
- *
- * The hourly cron has to be able to appear on a screen somebody is already
- * looking at, so the polling cannot stop altogether — but it does not need to
- * be every second and a half to catch a run that lasts a minute.
- */
-const IDLE_POLL_MS = 20_000;
 
 export function RefreshButton({ lastChecked, exactWhen }: {
   lastChecked: string | null;
@@ -85,11 +74,31 @@ export function RefreshButton({ lastChecked, exactWhen }: {
     }
   }, []);
 
+  /*
+   * The poll loop. The timings are in lib/poll-schedule.ts, and a hidden tab
+   * does not poll at all.
+   *
+   * That last part is not a nicety. Every open tab was asking this route every
+   * twenty seconds for ever, and each ask takes one of the fifteen database
+   * connections the whole project has — which is a share of the
+   * EMAXCONNSESSION errors the operator was seeing as "Application error" on
+   * other screens. A tab nobody is looking at draws nothing, so it asks
+   * nothing, and picks up again the moment it is looked at.
+   */
   useEffect(() => {
     let live = true;
-    let timer: ReturnType<typeof setTimeout>;
+    let timer: ReturnType<typeof setTimeout> | undefined;
 
-    const tick = async () => {
+    function schedule(sweeping: boolean) {
+      const delay = nextPollDelay({ sweeping, hidden: document.hidden });
+      // Null means stop. `onVisible` below is what starts it again.
+      if (delay === null) return;
+      timer = setTimeout(tick, delay);
+    }
+
+    async function tick() {
+      if (!live || document.hidden) return;
+
       const next = await poll();
       if (!live) return;
 
@@ -106,11 +115,25 @@ export function RefreshButton({ lastChecked, exactWhen }: {
       }
       if (next && !next.done) refreshed.current = false;
 
-      timer = setTimeout(tick, next && !next.done ? POLL_MS : IDLE_POLL_MS);
-    };
+      schedule(Boolean(next && !next.done));
+    }
 
-    tick();
-    return () => { live = false; clearTimeout(timer); };
+    function onVisible() {
+      if (!live || document.hidden) return;
+      // Straight away rather than in a minute: somebody has just come back to
+      // the tab and the first thing they look at is this line.
+      clearTimeout(timer);
+      void tick();
+    }
+
+    void tick();
+    document.addEventListener('visibilitychange', onVisible);
+
+    return () => {
+      live = false;
+      clearTimeout(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
   }, [poll, router]);
 
   const running = progress?.state === 'running';

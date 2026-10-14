@@ -1,5 +1,5 @@
 import { and, desc, eq, gte, isNull, sql as raw } from 'drizzle-orm';
-import { getDb, rowsOf, at as ts } from '@/db';
+import { getDb, retryableRead, rowsOf, at as ts } from '@/db';
 import { closures } from '@/db/schema';
 import { now } from '@/lib/clock';
 import { exact, human, madridMidnightUtc, madridParts } from '@/lib/time';
@@ -93,7 +93,9 @@ function monthRange(key: string): { from: Date; until: Date } | null {
   };
 }
 
-export async function closuresView(opts: ClosuresQuery = {}): Promise<ClosuresView> {
+export const closuresView = retryableRead('closures list', closuresViewQuery);
+
+async function closuresViewQuery(opts: ClosuresQuery = {}): Promise<ClosuresView> {
   const at = opts.at ?? now();
   const page = Math.max(1, Math.floor(opts.page ?? 1));
   const windowDays = retentionDays();
@@ -185,7 +187,9 @@ export async function closuresView(opts: ClosuresQuery = {}): Promise<ClosuresVi
 }
 
 /** How many write-offs stand, all time. The Parcels tab's count. */
-export async function closureCount(): Promise<number> {
+export const closureCount = retryableRead('closures count', closureCountQuery);
+
+async function closureCountQuery(): Promise<number> {
   const [row] = await getDb().select({ n: raw<number>`count(*)::int` })
     .from(closures).where(isNull(closures.undoneAt));
   return row?.n ?? 0;

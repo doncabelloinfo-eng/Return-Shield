@@ -1,6 +1,5 @@
 import { NextResponse } from 'next/server';
 import { currentUser } from '@/lib/auth/session';
-import { closeDb } from '@/db';
 import { loadDemoClock } from '@/lib/demo-clock';
 import { now } from '@/lib/clock';
 import { progressLine, readProgress, viewProgress } from '@/lib/sweep-progress';
@@ -29,51 +28,55 @@ export const maxDuration = 10;
  * `requireUser` answers a signed-out request with a redirect to /login, which
  * a fetch follows and then fails to parse as JSON. A 401 is the honest answer
  * and the client stops polling on it.
+ *
+ * AND IT DOES NOT CLOSE THE POOL. It used to, in a `finally`, on the reasoning
+ * that a route called every second and a half should hand its connection back.
+ * That reasoning is wrong and it caused the intermittent "Application error: a
+ * server-side exception has occurred" on every screen. The pool is a
+ * module-level singleton shared by every request running in the same instance
+ * (db/index.ts), so closing it here pulled the connection out from under
+ * whatever page render happened to be in flight next to this poll — and this
+ * route is polled by the Refresh button, which the panel layout renders on
+ * every screen. See tests/pool-lifetime.test.ts; `idle_timeout: 20` is what
+ * hands idle connections back, and it needs no help.
  */
 export async function GET(): Promise<NextResponse> {
   if (!process.env.DATABASE_URL) {
     return NextResponse.json({ progress: null }, { headers: { 'Cache-Control': 'no-store' } });
   }
 
-  try {
-    const user = await currentUser();
-    if (!user) {
-      return NextResponse.json(
-        { error: 'unauthorised' },
-        { status: 401, headers: { 'Cache-Control': 'no-store' } },
-      );
-    }
-
-    await loadDemoClock();
-    const at = now();
-    const view = viewProgress(await readProgress(), at);
-
+  const user = await currentUser();
+  if (!user) {
     return NextResponse.json(
-      {
-        progress: view && view.show
-          ? {
-            label: view.label,
-            state: view.state,
-            total: view.total,
-            checked: view.checked,
-            changed: view.changed,
-            left: view.left,
-            percent: view.total > 0
-              ? Math.min(100, Math.round((view.checked / view.total) * 100))
-              : 0,
-            line: progressLine(view),
-            done: view.done,
-          }
-          : null,
-      },
-      // Belt and braces with `fetchCache` above: this header is what stops a
-      // CDN or the browser itself holding on to a progress reading.
-      { headers: { 'Cache-Control': 'no-store, max-age=0' } },
+      { error: 'unauthorised' },
+      { status: 401, headers: { 'Cache-Control': 'no-store' } },
     );
-  } finally {
-    // Serverless instances are frozen between invocations, and this route is
-    // called every second and a half. Handing the connection back matters more
-    // here than anywhere else in the app.
-    await closeDb().catch(() => {});
   }
+
+  await loadDemoClock();
+  const at = now();
+  const view = viewProgress(await readProgress(), at);
+
+  return NextResponse.json(
+    {
+      progress: view && view.show
+        ? {
+          label: view.label,
+          state: view.state,
+          total: view.total,
+          checked: view.checked,
+          changed: view.changed,
+          left: view.left,
+          percent: view.total > 0
+            ? Math.min(100, Math.round((view.checked / view.total) * 100))
+            : 0,
+          line: progressLine(view),
+          done: view.done,
+        }
+        : null,
+    },
+    // Belt and braces with `fetchCache` above: this header is what stops a
+    // CDN or the browser itself holding on to a progress reading.
+    { headers: { 'Cache-Control': 'no-store, max-age=0' } },
+  );
 }

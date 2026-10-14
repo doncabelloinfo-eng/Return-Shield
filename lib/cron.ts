@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { timingSafeEqual } from 'node:crypto';
 import { and, eq, gte, lt } from 'drizzle-orm';
-import { getDb, closeDb } from '@/db';
+import { getDb } from '@/db';
 import { jobRuns } from '@/db/schema';
 import { runJob, type JobName, type JobResult } from '@/jobs/definitions';
 import { acquireJobLock, releaseJobLock, leaseSecondsFor, type Lease } from '@/lib/job-lock';
@@ -184,19 +184,21 @@ export function cronRoute(
         { status: outcome.ok ? 200 : 500 },
       );
     } finally {
-      // Release before closing the pool: there is no connection to release
-      // through afterwards, the error would be swallowed, and the job would be
-      // wedged for the whole lease.
+      // Release the lease on every path, including the skipped ones, which is
+      // where it used to leak.
       try {
         if (lease) await releaseJobLock(lease);
       } catch {
         // Left to expire. The lease is the backstop for exactly this.
       }
-      // Serverless instances are frozen between invocations. Handing the
-      // connections back keeps a job that runs every few minutes from sitting
-      // on a pool — and this has to happen on every path, including the
-      // skipped ones, which is where it used to leak.
-      await closeDb().catch(() => {});
+      // And nothing else. This used to call closeDb() here, to hand the
+      // connections back on a serverless instance that gets frozen between
+      // invocations. But the pool is a module-level singleton shared by every
+      // request in the instance (db/index.ts), and a cron route can land on an
+      // instance that is also serving pages — so closing it took the
+      // connection out from under them. `idle_timeout: 20` in db/index.ts is
+      // the mechanism that drains an idle pool, and it needs no help from a
+      // request. See tests/pool-lifetime.test.ts.
     }
   };
 }

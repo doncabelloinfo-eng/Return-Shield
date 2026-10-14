@@ -887,6 +887,124 @@ the events have been written.
 
 ---
 
+## 6f. Fifteen connections, and the "Application error" that came and went
+
+### What it looked like
+
+`/parcels?status=stuck_pre_admission` showing "Application error: a server-side
+exception has occurred", digest `3880840699`. Not every time; often, while the
+app was being used, and on a different screen each time.
+
+### What it was
+
+Every error in a week of Vercel logs — 109 of them — was one error:
+
+```
+(EMAXCONNSESSION) max clients reached in session mode -
+max clients are limited to pool_size: 15
+```
+
+thrown by whichever query a request ran first: the session lookup, the Parcels
+counts, the panel layout's rows, the closures count, the Upload screen's
+batches. Observability put `/today` at 13% failed invocations, `/parcels` at
+12.9% and `/api/sweep-progress` at 17.8%. Nothing was leaking permanently — at
+a quiet moment `pg_stat_activity` showed no app connections at all. The fifteen
+were held by the app's own instances, during use and just after it.
+
+Supabase Nano gives the project a pool of 15, and the app is on the **session**
+pooler (port 5432) because transaction mode crossed query parameters between
+concurrent queries (§6b). In session mode every client holds its own backend,
+so fifteen is the whole app. Four things spent them faster than they came back:
+
+1. **`max: 3` per instance, and timers that do not run while an instance
+   sleeps.** Fluid compute suspends an instance between invocations, so
+   postgres.js' `idle_timeout` never fires and the connections are held until
+   the VM shuts down. Three per instance × five sleeping instances = 15.
+2. **`closeDb()` in two request paths** — the cron wrapper and the progress
+   poll. The pool is a module-level singleton shared by every request on the
+   instance, so this took it away from whatever else was mid-render, and the
+   replacement client was built while the old one's connections were still
+   draining. For a few seconds the instance held both.
+3. **The idle poll.** Every open tab asked `/api/sweep-progress` every twenty
+   seconds for ever, whether or not anything was running and whether or not
+   anybody was looking at the tab.
+4. **Nine connections wanted at once per page view**, including `loadRows()` —
+   every shipment in the database, with no `WHERE`, plus two follow-up queries
+   over all of them, to produce the one integer in the top bar. And every list
+   prefetched `/parcel/[id]` for each of its rows: 290 invocations in twelve
+   hours against 31 views of the screen that linked to them.
+
+### What changed
+
+One connection per instance (`DB_POOL_MAX`, default 1 on Vercel), `idle_timeout`
+of 5 seconds, and a release window held open past the response with the
+per-invocation `waitUntil` so the idle timer can actually fire before the
+instance is suspended. The window **closes nothing itself** — see below.
+
+`closeDb()` is gone from both request paths, and `tests/pool-lifetime.test.ts`
+now fails if any file under `app/`, `lib/`, `components/` or `jobs/` so much as
+mentions it. One session lookup per request instead of three (`perRequest`), a
+single small query for the top bar over live parcels only
+(`lib/views/todo.ts`), `prefetch={false}` on every link to a parcel, and a poll
+that stops dead while the tab is hidden and looks once a minute rather than
+three times when it is not.
+
+A read whose connection was refused **before the query was sent** is retried at
+250ms, 750ms and 1.5s, and only then. A query that reached the database is
+never retried, because there is no way to know from here whether the server
+committed it. And when all of that is not enough, `app/(panel)/error.tsx` says
+"The database was busy for a moment. Trying again…", retries once by itself and
+keeps the digest in small print, instead of showing a stack-trace message to
+somebody who can only read it.
+
+### Why the release window does not close anything
+
+`attachDatabasePool` from `@vercel/functions` is the documented answer to the
+suspension problem. It is not a dependency of this project, and it is written
+against a `pg`/`mysql2` pool — `idleCount`, `on('connect')` — none of which a
+postgres.js `Sql` has. So `armIdleRelease` in `db/index.ts` uses what that
+package is itself a wrapper around: the request context Vercel puts on
+`globalThis` under a well-known symbol, and its `waitUntil`. It arms one timer
+per instance, slightly longer than `idle_timeout`, and lets postgres.js close
+its own idle connections on its own schedule.
+
+It would have been easy to make it force the pool shut instead. That is exactly
+what `closeDb()` in a request path did, and it is the bug above.
+
+## 6g. Export PDF, written without a PDF library
+
+The operator sends lists to the warehouse — everything stuck in pre-admission,
+for instance — and there was no way to get one out. "Export PDF" sits beside
+the filters on every Parcels tab except *Closed by hand*, whose list comes from
+`closures`.
+
+It is a GET behind the login carrying the screen's own query string, so the
+file is whatever the tab, the search box, the shop and the ship-date filter are
+showing — every row of it, not the hundred on screen. `parcelsExport` is
+`parcelsView` with the paging taken off: the same `base()`, the same tab
+predicate, the same filters, the same order. The PDF's count therefore cannot
+disagree with the number on the tab.
+
+**Eight columns, and no personal data.** The operator chose order and tracking
+only: order number, shop, ordered, shipped, tracking code, status (English with
+Correos' word beneath), how long it has been in this status, and the last thing
+Correos said. No name, address, phone, email or amount — and because this file
+is emailed to a third party, "not shown" was not good enough: the test reads
+the whole PDF back and fails if any of them appears anywhere in it.
+
+**No library.** `lib/export/pdf.ts` writes the bytes. The brief named the trap
+that comes with the obvious choice — pdfkit reads its font metrics off disk,
+which Next's output tracing is liable to leave out of a serverless bundle, so
+it works in a test and throws on Vercel — and a PDF that uses only the base-14
+fonts needs no font files, no metrics and no dependency. Text is encoded as
+WinAnsi by hand, which is what makes Logroño, Muñoz, Cádiz and Peñíscola
+survive: one byte each, and the file declares the encoding it uses.
+
+What it gives up is text measurement, which is what those metrics are for.
+Courier is exact at 600/1000 of an em; the other two are estimated on the
+generous side, so a long line is cut a character early rather than running into
+the column beside it.
+
 ## 7. Where I departed from the prototype
 
 The prototype is the specification, and I ported it. These are the places I did

@@ -49,7 +49,7 @@ export function ParcelTable({
                 </td>
 
                 <td className="whitespace-nowrap border-b border-line text-[13.5px] font-medium text-ink" style={{ padding: 'var(--rowpad)' }}>
-                  <Link href={`/parcel/${r.id}`} className="text-ink hover:text-crit">{r.customerName}</Link>
+                  <Link href={`/parcel/${r.id}`} prefetch={false} className="text-ink hover:text-crit">{r.customerName}</Link>
                   <div className="text-[11.5px] font-normal text-muted">{r.orderNumber} · {r.storeName}</div>
                 </td>
 
