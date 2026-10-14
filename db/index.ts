@@ -46,6 +46,10 @@ function connectionString(): string {
 
 /** The raw postgres.js client. Prefer `getDb()` unless you need raw SQL. */
 export function getSql(): postgres.Sql {
+  // Before the cached-client return, not after it: the release window is
+  // measured from the last use of the pool, and all but the very first use
+  // takes this early exit.
+  armIdleRelease();
   if (globalForDb.__rsClient) return globalForDb.__rsClient;
 
   const url = connectionString();
@@ -95,11 +99,53 @@ export function getSql(): postgres.Sql {
      * while the instance is still awake — between two page views, not after
      * the operator has moved on. It cannot fire while the instance is
      * suspended, so the shorter window is what makes a sleeping instance more
-     * likely to be holding nothing. See `releaseIdleConnections`, which is the
-     * other half of this.
+     * likely to be holding nothing. See `armIdleRelease`, which is the other
+     * half of this: it keeps the instance awake long enough for this timer to
+     * fire.
      */
     idle_timeout: envNumber('DB_IDLE_TIMEOUT', 5),
-    connect_timeout: 10,
+    /*
+     * Five seconds, not ten.
+     *
+     * This is the dominant term in how long the operator waits for an error
+     * page: a refused connection is retried (see `isConnectionRefusal`), so a
+     * pooler that accepts the socket and then does not finish the handshake
+     * costs this much per attempt. The pooler is in-region — a healthy connect
+     * is milliseconds — so ten seconds of waiting was ten seconds of looking
+     * at nothing. `RETRY_BUDGET_MS` is the other half of that bound.
+     */
+    connect_timeout: envNumber('DB_CONNECT_TIMEOUT', 5),
+    /*
+     * THE DRIVER DOES NOT GET TO ADD ITS OWN BACKOFF ON TOP OF OURS.
+     *
+     * postgres.js counts every connection that closes with an error in
+     * `options.shared.retries`, SHARED BY THE WHOLE POOL, and makes the next
+     * connection attempt wait
+     *
+     *   (0.5 + random/2) × min(3^retries / 100, 20)  seconds
+     *
+     * — 3.6 to 7.3 seconds after the sixth failure, and 10 to 20 seconds from
+     * the seventh on, until something connects. Every query on the instance
+     * queues behind that wait, and our own retries feed it: one page load is a
+     * session lookup, four layout loaders and the page's own queries, four
+     * attempts each, which is easily enough to put the instance on a
+     * ten-second floor for every request that follows.
+     *
+     * Measured on a built server with Postgres stopped, before this line:
+     * /api/sweep-progress answered in 2.6s as designed, /settings then
+     * returned nothing at all in 30 seconds — no headers, no log lines — and
+     * the next /api/sweep-progress hung too. Supabase's EMAXCONNSESSION
+     * arrives as a FATAL during connection startup, so a full pooler counts
+     * here exactly the same way: in production this would have been long
+     * spinners rather than the 2.5-second error page.
+     *
+     * `withDbRetry` owns the spacing between attempts (RETRY_DELAYS_MS) and
+     * the ceiling on the whole sequence (RETRY_BUDGET_MS). A tenth of a second
+     * is all the driver needs on top of that. With this line the same built
+     * server answered /settings in 4.2s, /today in 2.7s, and the error page
+     * recovered on its own 2.8 seconds after Postgres came back.
+     */
+    backoff: () => 0.1,
     // Off everywhere, including on the session pooler where it would work.
     // See db/connection.ts.
     prepare: shape.prepare,
@@ -108,13 +154,13 @@ export function getSql(): postgres.Sql {
   });
 
   globalForDb.__rsClient = client;
-  armIdleRelease();
   return client;
 }
 
 /** The query builder. Everything that reads or writes goes through this. */
 export function getDb(): Db {
-  if (globalForDb.__rsDb) { armIdleRelease(); return globalForDb.__rsDb; }
+  armIdleRelease();
+  if (globalForDb.__rsDb) return globalForDb.__rsDb;
   const database = drizzle(getSql(), { schema });
   globalForDb.__rsDb = database;
   return database;
@@ -221,22 +267,52 @@ function idleTimeoutMs(): number {
 
 /** One pending window per instance, however many requests arrive inside it. */
 let releasing: Promise<void> | null = null;
-/** When the pool was last asked for. The window is measured from THIS. */
+/** When the pool was last used. The window is measured from THIS. */
 let lastUsedAt = 0;
+/** The invocations already holding this window open, so each is asked once. */
+const holding = new WeakSet<object>();
+
+/**
+ * The longest one window may be extended before it settles anyway.
+ *
+ * Without it, an instance busy enough to run a query every few seconds — an
+ * operator clicking between screens, which is the normal use of this app —
+ * pushes `lastUsedAt` forward for ever and the promise never resolves. That
+ * matters because `releasing` is also what stops a second window being
+ * opened: a promise that never settles would leave the mechanism permanently
+ * disarmed on that instance, which is worse than not having it. When this cap
+ * closes a window, the next query simply opens a fresh one.
+ */
+const MAX_HOLD_MS = 30_000;
 
 export function armIdleRelease(): void {
   lastUsedAt = Date.now();
-  if (releasing) return;
-  const waitUntil = requestContext()?.waitUntil;
-  if (!waitUntil) return;
 
-  releasing = holdUntilIdle().finally(() => { releasing = null; });
+  const ctx = requestContext();
+  if (!ctx?.waitUntil) return;
+
+  if (!releasing) {
+    releasing = holdUntilIdle().finally(() => { releasing = null; });
+  }
+
+  /*
+   * EVERY invocation that touches the pool holds the instance open, not only
+   * the one that happened to open the window.
+   *
+   * The first version registered `waitUntil` once and returned early for
+   * everybody after it, so the hold lasted only as long as the FIRST
+   * request's invocation. Once that was torn down nothing kept the instance
+   * awake, and `releasing` being non-null meant no later request could arm
+   * one either.
+   */
+  if (holding.has(ctx)) return;
+  holding.add(ctx);
 
   try {
-    waitUntil(releasing);
+    ctx.waitUntil(releasing);
   } catch {
-    // An older runtime without waitUntil. The pool behaves as it did before.
-    releasing = null;
+    // An older runtime without waitUntil. The pool behaves as it did before;
+    // the window still settles and clears itself.
   }
 }
 
@@ -258,8 +334,10 @@ export function armIdleRelease(): void {
  * allowed to sleep.
  */
 async function holdUntilIdle(): Promise<void> {
+  const openedAt = Date.now();
   for (;;) {
-    const left = (lastUsedAt + idleTimeoutMs() + 1_000) - Date.now();
+    const due = Math.min(lastUsedAt + idleTimeoutMs() + 1_000, openedAt + MAX_HOLD_MS);
+    const left = due - Date.now();
     if (left <= 0) return;
     await new Promise<void>((resolve) => { setTimeout(resolve, left); });
   }
@@ -306,6 +384,18 @@ export function isConnectionRefusal(err: unknown): boolean {
 export const RETRY_DELAYS_MS = [250, 750, 1_500] as const;
 
 /**
+ * And the whole sequence gives up after this, however it is spending the time.
+ *
+ * The delays add up to 2.5 seconds, but an ATTEMPT is not free: a pooler that
+ * accepts the socket and then stalls costs `connect_timeout` per go, so four
+ * attempts could have been forty seconds of staring at a blank screen —
+ * longer than the platform would even keep the invocation alive, which would
+ * mean a gateway timeout instead of the error page that knows how to recover.
+ * This is the ceiling on the wait before that page appears.
+ */
+export const RETRY_BUDGET_MS = 4_000;
+
+/**
  * Run a READ and give a refused connection a second chance.
  *
  * Reads only, and the type does not enforce that — the rule is in the hands of
@@ -338,6 +428,8 @@ export async function withDbRetry<T>(label: string, run: () => Promise<T>): Prom
 }
 
 async function attemptWithRetries<T>(label: string, run: () => Promise<T>): Promise<T> {
+  const startedAt = Date.now();
+
   for (let attempt = 0; ; attempt += 1) {
     try {
       return await run();
@@ -345,6 +437,14 @@ async function attemptWithRetries<T>(label: string, run: () => Promise<T>): Prom
       if (attempt >= RETRY_DELAYS_MS.length || !isConnectionRefusal(err)) throw err;
 
       const wait = RETRY_DELAYS_MS[attempt];
+
+      if (Date.now() - startedAt + wait > RETRY_BUDGET_MS) {
+        // Out of budget: the attempts themselves are taking the time, which
+        // means the pooler is not refusing quickly but stalling. The honest
+        // answer is the error page, which retries on its own.
+        console.warn(`[db] connection refused: out of retry budget — ${label}`);
+        throw err;
+      }
       // One plain line per refusal, greppable in the Vercel logs, and with
       // nothing in it that could carry a password: the label is ours and the
       // size comes out of the server's own message.
@@ -354,6 +454,20 @@ async function attemptWithRetries<T>(label: string, run: () => Promise<T>): Prom
         + ` — ${label}, retrying in ${wait}ms`,
       );
       await new Promise((resolve) => { setTimeout(resolve, wait); });
+    } finally {
+      /*
+       * The window is measured from when a query SETTLES, not from when it was
+       * built.
+       *
+       * `getDb()` stamps `lastUsedAt` as the query is issued, and postgres.js
+       * starts its own idle timer when the connection goes quiet — when the
+       * query comes back. With `max: 1` on Vercel the queries of one page
+       * queue behind each other, so the last one can land seconds after it was
+       * issued, and a window measured from the issue could close before the
+       * pool's timer had even started. One stamp here covers every read that
+       * goes through a retry wrapper, which is nearly all of them.
+       */
+      lastUsedAt = Date.now();
     }
   }
 }

@@ -32,14 +32,22 @@ export default async function PanelLayout({ children }: { children: React.ReactN
    * beat here instead of "Application error" on whichever of these lost the
    * race — but wrapping the whole `Promise.all` meant a single refusal re-ran
    * all four, which is sixteen connection attempts against the resource that
-   * had just run out. `todoCount` brings its own retry (lib/views/todo.ts),
-   * and `withDbRetry` is re-entrant, so nothing here can nest.
+   * had just run out.
+   *
+   * THREE OF THESE BRING THEIR OWN RETRY, and they have to. `todoCount`,
+   * `engineHealth` and `sweepStatus` are all memoised with `perRequest`, which
+   * is React's `cache()` — it caches the PROMISE, so a retry wrapped round the
+   * call site re-awaits the same rejected promise and never issues a second
+   * query. The retry has to live inside the memo, at the definition. See the
+   * note above `engineHealth` in lib/engine-health.ts.
+   *
+   * `recentActivity` is a plain function, so it is wrapped here.
    */
   const [ticker, todo, health, sweep] = await Promise.all([
     withDbRetry('recent activity', () => recentActivity(24)),
     todoCount(),
-    withDbRetry('engine health', () => engineHealth()),
-    withDbRetry('sweep status', () => sweepStatus()),
+    engineHealth(),
+    sweepStatus(),
   ]);
 
   const at = now();

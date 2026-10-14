@@ -1,8 +1,9 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
-  RETRY_DELAYS_MS, armIdleRelease, idleReleaseArmed, isConnectionRefusal, retryableRead,
-  withDbRetry,
+  RETRY_BUDGET_MS, RETRY_DELAYS_MS, armIdleRelease, getSql, idleReleaseArmed,
+  isConnectionRefusal, retryableRead, withDbRetry,
 } from '@/db';
+import { closeDb } from './helpers/db';
 import {
   NEW_INCIDENT_AFTER_MS, RETRY_ATTEMPTS, RETRY_EVERY_MS, RETRY_FIRST_MS, attemptsSoFar,
   nextErrorRetryMs,
@@ -162,6 +163,31 @@ describe('a read that was refused a connection', () => {
     expect(await withDbRetry('fine', async () => 7)).toBe(7);
   });
 
+  it('gives up early when the attempts themselves are eating the time', async () => {
+    /*
+     * The delays add up to 2.5 seconds, but an attempt is not free. A pooler
+     * that accepts the socket and then stalls costs `connect_timeout` per go,
+     * so four attempts could have been forty seconds in front of a blank
+     * screen — longer than the platform keeps the invocation alive, which
+     * would mean a gateway timeout instead of the error page that knows how to
+     * recover. The budget is the ceiling on the wait before that page.
+     */
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    let calls = 0;
+
+    const started = Date.now();
+    await expect(withDbRetry('a stalling pooler', async () => {
+      calls += 1;
+      await sleep(RETRY_BUDGET_MS / 2 + 100);
+      throw poolerFull();
+    })).rejects.toThrow(/max clients/);
+    const took = Date.now() - started;
+
+    expect(calls).toBeGreaterThanOrEqual(1);
+    expect(calls, 'it stopped before using all its attempts').toBeLessThan(RETRY_DELAYS_MS.length + 1);
+    expect(took, 'the budget plus the attempt that broke it').toBeLessThan(RETRY_BUDGET_MS * 2 + 1_000);
+  }, 20_000);
+
   it('retries at ONE level, however deeply the wrappers nest', async () => {
     /*
      * The twenty-five seconds. Measured in Chromium against a built server:
@@ -243,25 +269,48 @@ describe('the window that lets the pool let go', () => {
     expect(idleReleaseArmed()).toBe(false);
   });
 
-  it('holds the instance open past the response, once, however many requests arrive', async () => {
+  it('asks one invocation to hold it open once, however many queries it runs', async () => {
     process.env.DB_IDLE_TIMEOUT = '1';
     const held: Promise<unknown>[] = [];
-    (globalThis as Record<symbol, unknown>)[SYMBOL] = {
-      get: () => ({ waitUntil: (p: Promise<unknown>) => { held.push(p); } }),
-    };
+    // ONE context object, the way a real invocation's context is one object.
+    const ctx = { waitUntil: (p: Promise<unknown>) => { held.push(p); } };
+    (globalThis as Record<symbol, unknown>)[SYMBOL] = { get: () => ctx };
 
     armIdleRelease();
     armIdleRelease();
     armIdleRelease();
 
-    // One window per instance, not one per request — otherwise a busy minute
-    // would keep an instance alive for as long as the requests kept coming.
     expect(held).toHaveLength(1);
     expect(idleReleaseArmed()).toBe(true);
 
     // It is a wait, not a close: nothing here ends the pool, because the pool
     // is shared by every request on the instance. That is the lesson of
     // tests/pool-lifetime.test.ts.
+    await held[0];
+    expect(idleReleaseArmed()).toBe(false);
+  }, 10_000);
+
+  it('asks EVERY invocation that uses the pool, not just the first', async () => {
+    /*
+     * The first version registered `waitUntil` once and took the early return
+     * for everybody after it. So the hold lasted only as long as the FIRST
+     * request's invocation; when that was torn down nothing kept the instance
+     * awake, and `releasing` being non-null meant no later request could arm
+     * one either — the mechanism disarmed itself on a busy instance.
+     */
+    process.env.DB_IDLE_TIMEOUT = '1';
+    const held: Promise<unknown>[] = [];
+    let ctx = { waitUntil: (p: Promise<unknown>) => { held.push(p); } };
+    (globalThis as Record<symbol, unknown>)[SYMBOL] = { get: () => ctx };
+
+    armIdleRelease();                    // invocation one
+    ctx = { waitUntil: (p: Promise<unknown>) => { held.push(p); } };
+    armIdleRelease();                    // invocation two, inside the same window
+
+    expect(held).toHaveLength(2);
+    // The same window, handed to both: one timer for the instance.
+    expect(held[0]).toBe(held[1]);
+
     await held[0];
     expect(idleReleaseArmed()).toBe(false);
   }, 10_000);
@@ -283,9 +332,8 @@ describe('the window that lets the pool let go', () => {
      */
     process.env.DB_IDLE_TIMEOUT = '1';
     const held: Promise<unknown>[] = [];
-    (globalThis as Record<symbol, unknown>)[SYMBOL] = {
-      get: () => ({ waitUntil: (p: Promise<unknown>) => { held.push(p); } }),
-    };
+    const ctx = { waitUntil: (p: Promise<unknown>) => { held.push(p); } };
+    (globalThis as Record<symbol, unknown>)[SYMBOL] = { get: () => ctx };
 
     let settled = false;
     armIdleRelease();
@@ -390,4 +438,69 @@ describe('when the error page tries again by itself', () => {
     expect(attemptsSoFar(4, now - NEW_INCIDENT_AFTER_MS - 1, now)).toBe(0);
     expect(attemptsSoFar(4, 0, now)).toBe(0);
   });
+});
+
+/* ======================================== the driver's own reconnect backoff */
+
+describe('five reads in a row against a database that is not there', () => {
+  /**
+   * THE WAIT THAT IS NOT OURS.
+   *
+   * postgres.js counts every connection that closes with an error in a
+   * counter shared by the whole pool, and spaces the next attempt by
+   * `(0.5 + random/2) × min(3^retries / 100, 20)` seconds — ten to twenty from
+   * the seventh failure on, until something connects. Every query on the
+   * instance queues behind it, and our retries are what feed it.
+   *
+   * Measured on a built server with Postgres stopped, before `backoff` was
+   * set: /api/sweep-progress answered in 2.6s as designed, /settings then
+   * returned NOTHING in thirty seconds — no headers, no log lines — and the
+   * next /api/sweep-progress hung as well. A full pooler in production would
+   * have been long spinners, not the error page.
+   *
+   * So the shape that matters is not one read but five in a row: the fifth
+   * must be no slower than the first. Without `backoff: () => 0.1` in
+   * db/index.ts this test fails on the later reads, by a factor of five or
+   * more, which is the whole point of it.
+   */
+  const REAL_URL = process.env.DATABASE_URL;
+
+  afterEach(async () => {
+    await closeDb();
+    if (REAL_URL) process.env.DATABASE_URL = REAL_URL;
+    else delete process.env.DATABASE_URL;
+  });
+
+  it('each settle in about three seconds, and the fifth is not slower than the first', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    // Nothing is listening on port 1, so every connection is refused at once
+    // and the only thing that can make these reads slow is a delay somebody
+    // chose. 127.0.0.1 also means no TLS — see db/connection.ts.
+    process.env.DATABASE_URL = 'postgres://nobody:nothing@127.0.0.1:1/nothing';
+    // Drop the pool built from the real URL so the next getSql() takes this one.
+    await closeDb();
+
+    const took: number[] = [];
+    for (let i = 0; i < 5; i += 1) {
+      const started = Date.now();
+      await expect(
+        withDbRetry('a closed port', async () => getSql()`SELECT 1`),
+      ).rejects.toThrow();
+      took.push(Date.now() - started);
+    }
+
+    const all = took.join('ms, ');
+
+    for (const [i, ms] of took.entries()) {
+      // Four attempts spaced 250/750/1500 is 2.5s, plus a tenth of a second of
+      // driver backoff per attempt. The broken behaviour is ten to twenty
+      // seconds PER ATTEMPT, so this bound has room to spare and still cannot
+      // be met with the driver's own backoff in play.
+      expect(ms, `read ${i + 1} of 5 took ${ms}ms (${all}ms)`).toBeLessThan(5_000);
+    }
+
+    expect(took[4], `the fifth must not be slower than the first (${all}ms)`)
+      .toBeLessThan(took[0] + 2_000);
+  }, 120_000);
 });

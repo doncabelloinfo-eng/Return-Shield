@@ -1,6 +1,6 @@
 import { perRequest } from '@/lib/per-request';
 import { sql as raw } from 'drizzle-orm';
-import { getDb, rowsOf } from '@/db';
+import { getDb, rowsOf, retryableRead } from '@/db';
 import { now, MINUTE } from '@/lib/clock';
 import { agoInWords, exact } from '@/lib/time';
 import { isDemoMode } from '@/lib/demo-clock';
@@ -45,7 +45,21 @@ export type EngineHealth =
  * already carries the banner: without this the banner and the Connections
  * panel each ask the same question on the same page load.
  */
-export const engineHealth = perRequest(async (at: Date = now()): Promise<EngineHealth> => {
+/*
+ * `perRequest(retryableRead(...))`, AND THE ORDER OF THOSE TWO IS THE POINT.
+ *
+ * `perRequest` is React's `cache()`, which memoises what the function RETURNS
+ * — for an async function, the promise object. So a retry wrapped OUTSIDE the
+ * memo cannot work: the first attempt's promise is cached, it rejects, and
+ * every later attempt is handed the same rejected promise and throws instantly
+ * without issuing a query. Wrapping these at the call site in the panel layout
+ * did exactly that: 2.5 seconds of sleeping, one connection attempt, and the
+ * error page anyway.
+ *
+ * Memo outside, retry inside: the memo hands every caller in the request the
+ * same promise, and that promise is the one the retry loop is driving.
+ */
+export const engineHealth = perRequest(retryableRead('engine health', async (at: Date = now()): Promise<EngineHealth> => {
   // Demo mode exists to jump the clock. "+1 day" moves `now()` forward
   // twenty-four hours with nothing running in between, which would declare the
   // engine stopped every single time somebody pressed it.
@@ -73,7 +87,7 @@ export const engineHealth = perRequest(async (at: Date = now()): Promise<EngineH
     return { state: 'healthy', ...common };
   }
   return { state: 'stopped', ...common, exactWhen: exact(lastRunAt) };
-});
+}));
 
 /* -------------------------------------------------------------------------- */
 
@@ -125,7 +139,7 @@ export const JOB_CADENCE: Record<ScheduledJobName, string> = {
  * job`: that column is free text and still holds names of jobs that no longer
  * exist, which would leave a dead job on the screen for ever.
  */
-export const jobHealth = perRequest(async (at: Date = now()): Promise<JobHealth[]> => {
+export const jobHealth = perRequest(retryableRead('job health', async (at: Date = now()): Promise<JobHealth[]> => {
   // The roster is interpolated as ARRAY[$1, $2, …] one placeholder at a time,
   // rather than handed over as a single array parameter. Passing a JS array
   // into a raw template makes drizzle expand it into a comma list in
@@ -192,7 +206,7 @@ export const jobHealth = perRequest(async (at: Date = now()): Promise<JobHealth[
       failingSinceAgo: failing ? agoInWords(failing, at) : null,
     };
   });
-});
+}));
 
 /* -------------------------------------------------------------------------- */
 
@@ -219,7 +233,7 @@ export interface SweepStatus {
  * A skipped run counts here as it does everywhere else: it proves the sweep
  * reached the end, which is what "last checked" is answering.
  */
-export const sweepStatus = perRequest(async (at: Date = now()): Promise<SweepStatus> => {
+export const sweepStatus = perRequest(retryableRead('sweep status', async (at: Date = now()): Promise<SweepStatus> => {
   const rows = await getDb().execute(raw`
     SELECT max(started_at)                                                   AS last_at,
            max(started_at) FILTER (WHERE detail->>'manual' = 'true')          AS last_manual_at
@@ -236,4 +250,4 @@ export const sweepStatus = perRequest(async (at: Date = now()): Promise<SweepSta
     exactWhen: lastAt ? exact(lastAt) : null,
     lastManualAt: row?.last_manual_at ? new Date(row.last_manual_at) : null,
   };
-});
+}));

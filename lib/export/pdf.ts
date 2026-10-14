@@ -136,10 +136,26 @@ function ellipsise(lines: string[], maxLines: number): string[] {
  * turning into a wrong glyph.
  */
 const CP1252: Record<string, number> = {
-  '€': 0x80, '‚': 0x82, '„': 0x84, '…': 0x85, '†': 0x86, '‡': 0x87,
-  'ˆ': 0x88, '‰': 0x89, '‹': 0x8b, '‘': 0x91, '’': 0x92, '“': 0x93,
-  '”': 0x94, '•': 0x95, '–': 0x96, '—': 0x97, '™': 0x99, '›': 0x9b,
+  '€': 0x80, 'ƒ': 0x83, '‚': 0x82, '„': 0x84, '…': 0x85, '†': 0x86, '‡': 0x87,
+  'ˆ': 0x88, '‰': 0x89, 'Š': 0x8a, '‹': 0x8b, 'Œ': 0x8c, 'Ž': 0x8e,
+  '‘': 0x91, '’': 0x92, '“': 0x93, '”': 0x94, '•': 0x95, '–': 0x96, '—': 0x97,
+  '˜': 0x98, '™': 0x99, 'š': 0x9a, '›': 0x9b, 'œ': 0x9c, 'ž': 0x9e, 'Ÿ': 0x9f,
 };
+
+/**
+ * The hyphens Correos actually sends, folded to the one WinAnsi has.
+ *
+ * `normaliseDesc` in lib/carriers/correos/state-map.ts flattens U+2010 to
+ * U+2015 and U+2212 with the note that "Correos' own feed is inconsistent
+ * about '—', '-' and '–' in the same event" — so those code points are real
+ * inbound traffic. That flattening only builds the lookup key, though: what
+ * gets drawn is the raw description. Two of those dashes are in CP1252 and
+ * four are not, and a question mark in the middle of the sentence the operator
+ * reads out to Correos on the phone is worse than a plain hyphen.
+ */
+function foldedDash(code: number): boolean {
+  return (code >= 0x2010 && code <= 0x2012) || code === 0x2015 || code === 0x2212;
+}
 
 export function winAnsi(text: string): Buffer {
   const out: number[] = [];
@@ -148,6 +164,7 @@ export function winAnsi(text: string): Buffer {
     if (code === 0x0a || code === 0x0d) { out.push(0x20); continue; }
     if (code < 0x20) continue;
     if (code <= 0xff) { out.push(code); continue; }
+    if (foldedDash(code)) { out.push(0x2d); continue; }
     const mapped = CP1252[ch];
     out.push(mapped ?? 0x3f);
   }

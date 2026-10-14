@@ -1,5 +1,5 @@
 import { eq } from 'drizzle-orm';
-import { getDb } from '@/db';
+import { getDb, withDbRetry } from '@/db';
 import { settings } from '@/db/schema';
 
 /**
@@ -120,9 +120,24 @@ export async function getSettings(): Promise<AppSettings> {
   return out;
 }
 
+/**
+ * One stored setting.
+ *
+ * Retried, because of where this is called from: `loadDemoClock()` runs in the
+ * panel layout before anything that was already retried, and the progress poll
+ * reads the sweep row. Neither had a retry, so a pooler full for a quarter of
+ * a second put "Application error" on every screen with no second attempt.
+ *
+ * `withDbRetry` inside the function rather than `retryableRead` around it:
+ * this one is generic in its key, and a non-generic wrapper would collapse the
+ * return type to a union of every setting's type. The wrapper is re-entrant,
+ * so a read that is already inside somebody else's retry stays one attempt.
+ */
 export async function getSetting<K extends keyof AppSettings>(key: K): Promise<AppSettings[K]> {
-  const [row] = await getDb().select().from(settings).where(eq(settings.key, key)).limit(1);
-  return (row?.value as AppSettings[K]) ?? DEFAULT_SETTINGS[key];
+  return withDbRetry('setting', async () => {
+    const [row] = await getDb().select().from(settings).where(eq(settings.key, key)).limit(1);
+    return (row?.value as AppSettings[K]) ?? DEFAULT_SETTINGS[key];
+  });
 }
 
 export async function setSetting<K extends keyof AppSettings>(key: K, value: AppSettings[K]): Promise<void> {

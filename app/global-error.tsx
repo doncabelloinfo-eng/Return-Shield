@@ -50,13 +50,26 @@ function claimNextRetry(): number | null {
 }
 
 export default function GlobalError({ error }: { error: Error & { digest?: string } }) {
-  const [trying, setTrying] = useState(false);
+  /*
+   * Starts true, and the effect corrects it.
+   *
+   * `claimNextRetry` needs `sessionStorage`, so it can only run after mount —
+   * which means the first paint shows whatever this default says. Starting at
+   * false had it read "The database is still busy. Press the button" and then
+   * flip to "Trying again…", i.e. it said the opposite of what it was about to
+   * do. The normal case is that it IS about to try again, so that is what the
+   * markup says, and the one case where it will not (storage refused, or the
+   * attempts used up) turns it off.
+   */
+  const [trying, setTrying] = useState(true);
 
   useEffect(() => {
     const delay = claimNextRetry();
-    if (delay === null) return undefined;
+    if (delay === null) {
+      setTrying(false);
+      return undefined;
+    }
 
-    setTrying(true);
     const timer = setTimeout(() => { window.location.reload(); }, delay);
     return () => clearTimeout(timer);
   }, []);

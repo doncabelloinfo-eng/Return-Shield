@@ -56,9 +56,20 @@ afterAll(async () => {
 
 /* ------------------------------------------------------ reading a PDF back */
 
-/** Every string the file draws, in the order it draws them. */
+/**
+ * Every string the file draws, in the order it draws them.
+ *
+ * `latin1` for the bytes, with the three WinAnsi characters that are NOT
+ * Latin-1 mapped back. The ellipsis is the one that matters: `winAnsi` writes
+ * it as 0x85, which latin1 decodes to U+0085 — so an assertion that a line
+ * does not end with '…' was true of every line, truncated or not, and the
+ * guard against a cut label was inert while a cut label was in the file.
+ */
 function textOf(pdf: Buffer): string[] {
-  const body = pdf.toString('latin1');
+  const body = pdf.toString('latin1')
+    .replace(/\u0085/g, '…')
+    .replace(/\u0096/g, '–')
+    .replace(/\u0097/g, '—');
   const out: string[] = [];
   const pattern = /\(((?:[^()\\]|\\.)*)\) Tj/g;
   for (let m = pattern.exec(body); m; m = pattern.exec(body)) {
@@ -121,7 +132,10 @@ function makeRow(over: Partial<ParcelListRow> = {}): ParcelListRow {
   return {
     id: '11111111-1111-1111-1111-111111111111',
     state: 'created',
-    status: { en: 'Pre-admission', es: 'Pre-admisión / Prerregistrado' },
+    // The REAL labels, from STATE_LABEL — 49 characters. The fixture used to
+    // say 'Pre-admission', which is the short label no screen passes here, and
+    // that is why a column cutting the long one passed every test.
+    status: { en: 'Pre-admission (label made, not handed to Correos)', es: 'Pre-admisión / Prerregistrado' },
     orderNumber: 'ORD-1042',
     shippingCode: 'PQ3000012345ES',
     customerName: 'Lucía Fernández Ortiz',
@@ -131,7 +145,9 @@ function makeRow(over: Partial<ParcelListRow> = {}): ParcelListRow {
     shippedOn: '08 Oct',
     shippedExact: 'Thu 08 Oct 2026, 09:00',
     event: {
-      en: 'Pre-admission',
+      // The same table, so the same 49 characters: `eventLabels(...).en` and
+      // `stateLabels(...).en` both read STATE_LABEL.
+      en: 'Pre-admission (label made, not handed to Correos)',
       es: 'Prerregistrado el envío en origen',
       when: '08 Oct · 09:12',
       exactWhen: 'Thu 08 Oct 2026, 09:12',
@@ -260,6 +276,12 @@ describe('the eight columns', () => {
     const drawn = textOf(parcelsPdf([makeRow()], META));
     expect(drawn.join(' ')).toContain('4 working days in pre-admission');
     for (const line of drawn) expect(line.endsWith('…'), line).toBe(false);
+    // Both columns that draw STATE_LABEL, whole, over two lines each.
+    expect(drawn.join(' ')).toContain('Pre-admission (label made, not handed to Correos)');
+    expect(
+      drawn.join(' ').split('Pre-admission (label made, not handed to Correos)').length - 1,
+      'the Status column and the Correos column both draw it',
+    ).toBe(2);
 
     expect(textOf(parcelsPdf([makeRow({ badges: [] })], META)).join(' '))
       .toContain('6 days');

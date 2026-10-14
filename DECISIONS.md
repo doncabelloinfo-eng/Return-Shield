@@ -1081,6 +1081,112 @@ instance could be suspended still holding it. Which is the entire thing it
 exists to prevent. The wait is now re-checked against the last use, so a later
 query extends the window instead of opening a second one.
 
+## 6i. What the review of `770a7ac` found
+
+The fixes in 6h were reviewed by five independent passes before they were
+trusted, each hunting one class of defect, and each finding verified by trying
+to refute it. Six real defects, two of which would have made the round
+pointless.
+
+**The error page still only tried once.** `BusyDatabase`'s effect listed
+`[onRetry]` as its dependencies and re-armed itself by calling `setTick`. A
+state update does not re-run an effect whose dependencies have not changed,
+and `onRetry` never changes identity, so exactly one timer was ever armed: the
+page tried at three seconds and then said "Trying again…" for ever while doing
+nothing. The bug the round existed to fix, reproduced by the fix. `tick` is now
+a dependency, so the schedule advances whether or not React remounts the
+fallback.
+
+**Two of the four layout reads could not retry at all.** `engineHealth` and
+`sweepStatus` are wrapped in `perRequest`, which is React's `cache()` — and
+`cache` memoises what the function RETURNS, which for an async function is the
+promise. A retry wrapped round the call site therefore re-awaited the same
+rejected promise and never issued a second query: 2.5 seconds of sleeping, one
+connection attempt, and the error page anyway. The retry has to live inside the
+memo, at the definition. `todoCount` and the session lookup already had the
+order right, which is what made the contrast visible.
+
+**The release window was held by one invocation only.** `armIdleRelease`
+registered `waitUntil` once and returned early for everybody after it, so the
+hold lasted only as long as the first request's invocation — and because a
+non-null `releasing` was also what stopped a second window opening, a busy
+instance disarmed the mechanism entirely. Every invocation that touches the
+pool now holds the same window open, and the window is capped so it always
+settles.
+
+**And it was measured from the wrong moment again.** `lastUsedAt` was stamped
+when a query was ISSUED, while postgres.js starts its idle timer when the
+query COMPLETES. With `max: 1` the queries of one page queue behind each
+other, so a window measured from the issue could close before the pool's timer
+had started. Every read that goes through a retry wrapper now re-stamps when
+it settles.
+
+**Forty seconds, not 2.5.** `connect_timeout` was ten seconds and a connect
+timeout is retried, so a pooler that accepts the socket and then stalls cost up
+to 42.5 seconds per retry level — long enough for the platform to kill the
+invocation, which means a gateway timeout instead of the error page that knows
+how to recover. `connect_timeout` is five seconds now, and `RETRY_BUDGET_MS`
+caps the whole sequence at four, so the attempts cannot outrun the budget the
+delays imply.
+
+**The same long label was still being cut.** `wrap: 2` fixed the Status
+column, but "Last word from Correos" draws the SAME string — `eventLabels` and
+`stateLabels` both read `STATE_LABEL` — so every row of the stuck tab carried
+"Pre-admission (label made, not handed to Correos)" wrapped in one column and
+cut in the next. The guard that should have caught it was inert: `winAnsi`
+writes an ellipsis as the WinAnsi byte 0x85, the test decoded the file as
+Latin-1, and `endsWith('…')` was therefore false of every line whether it was
+truncated or not. Both fixed, and the test fixture now carries the labels
+production actually draws rather than the short ones no screen passes.
+
+Two smaller ones: `?date=banana` answered a download with a 500, because the
+first page's filter line re-parsed the raw query string instead of the
+validated date the SQL predicate was built from — and worse, `?date=2026-10-6`
+printed "Shipped on 06 Oct 2026" over a file of every day's parcels. And
+`winAnsi` turned four of the six dashes Correos is documented to send into
+question marks, mid-sentence, in the line the operator reads out on the phone.
+
+## 6j. The wait that was not ours
+
+With everything above in place, a built server with Postgres stopped behaved
+like this: `/api/sweep-progress` answered in 2.6 seconds as designed,
+`/settings` then returned **nothing at all in thirty seconds** — no headers, no
+`[db] connection refused` lines — and the next `/api/sweep-progress` hung too,
+where it had taken 2.6 seconds a moment earlier. Without Next at all, a script
+running three reads concurrently settled after 32 seconds instead of 2.5.
+
+It was postgres.js' own reconnect backoff. Every connection that closes with an
+error increments `options.shared.retries`, **shared by the whole pool**, and
+the next connection attempt waits
+
+```
+(0.5 + random/2) × min(3 ^ retries / 100, 20)  seconds
+```
+
+— 3.6 to 7.3 seconds after the sixth failure, and 10 to 20 seconds from the
+seventh on, until something connects. Every query on the instance queues
+behind that wait.
+
+Which means our own retries were the fuel. One page load is a session lookup,
+four layout loaders and the page's own queries, four attempts each: easily
+enough to put the instance on a ten-second floor for every request after it.
+And Supabase's `EMAXCONNSESSION` arrives as a FATAL during connection startup,
+so a full pooler counts here exactly like a dead database — in production this
+would have been long spinners, not the 2.5-second error page the rest of this
+work is about.
+
+`backoff: () => 0.1` in the pool options. `withDbRetry` owns the spacing
+between attempts and the ceiling on the sequence; the driver does not get to
+add a growing delay on top of that. With that one line the same built server
+answered `/settings` in 4.2 seconds and `/today` in 2.7, and in Chromium the
+error page recovered on its own 2.8 seconds after Postgres came back — and in
+0.3 seconds when the button was pressed.
+
+`tests/db-connections.test.ts` runs five reads in a row against a closed port
+and asserts the fifth is no slower than the first, because one read in
+isolation never showed this: it is the shared counter that makes the second
+page load the slow one.
+
 ## 7. Where I departed from the prototype
 
 The prototype is the specification, and I ported it. These are the places I did

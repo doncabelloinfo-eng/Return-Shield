@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { currentUser } from '@/lib/auth/session';
 import { loadDemoClock } from '@/lib/demo-clock';
 import { now } from '@/lib/clock';
-import { EXPORT_CAP, isParcelTab, parcelsExport } from '@/lib/views/parcels';
+import { EXPORT_CAP, isParcelTab, parcelsExport, parseDayFilter } from '@/lib/views/parcels';
 import { filterLine, parcelsPdf, pdfFilename } from '@/lib/export/parcels-pdf';
 
 // Per-request, behind a login or a signed token, and it reads the database.
@@ -81,7 +81,18 @@ export async function GET(req: Request): Promise<NextResponse> {
     tabLabel: view.tab.en,
     total: view.total,
     capped: view.capped,
-    filters: filterLine({ q, store, date }),
+    /*
+     * The heading's date comes from the SAME parse as the SQL predicate.
+     *
+     * It used to take the raw query string, which went wrong both ways round:
+     * `?date=banana` reached `Intl.DateTimeFormat`, threw RangeError and
+     * answered a download with a 500; and `?date=2026-10-6` — which
+     * `parseDayFilter` rejects, so no ship-date predicate was added — still
+     * printed "Shipped on 06 Oct 2026" on the first page. That second one is
+     * the dangerous half: a file of every day's parcels under a one-day
+     * heading, sent to a warehouse.
+     */
+    filters: filterLine({ q, store, date: parseDayFilter(date)?.key }),
     at,
   });
 

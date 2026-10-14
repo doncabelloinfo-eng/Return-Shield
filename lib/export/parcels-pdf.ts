@@ -114,9 +114,18 @@ export const COLUMNS: readonly Column[] = [
   {
     header: 'Last word from Correos',
     width: 147,
+    /*
+     * `wrap: 2` on the English label here too, and for the same reason as the
+     * Status column: this draws the SAME string. `eventLabels(...).en` reads
+     * the same `STATE_LABEL` table as `stateLabels(...).en`, so a parcel in
+     * `created` — every row of the Pre-admission and Stuck-in-pre-admission
+     * tabs — carried "Pre-admission (label made, not handed to Correos)" in
+     * both columns, wrapped in one and cut to "…(label made, not h…" in the
+     * other, on the same row.
+     */
     lines: (r) => (r.event
       ? [
-        { text: r.event.en },
+        { text: r.event.en, wrap: 2 },
         { text: r.event.es, grey: 0.45, small: true, wrap: 2 },
         { text: r.event.when, grey: 0.45, small: true },
       ]
@@ -319,9 +328,16 @@ export function filterLine(opts: {
   if (opts.q) bits.push(`Search "${opts.q}"`);
   if (opts.store) bits.push(`Shop: ${opts.store}`);
   if (opts.date) {
+    /*
+     * The caller passes the date the SQL predicate was built from
+     * (`parseDayFilter(date)?.key`), so this is already known-good. Checked
+     * again anyway, because the version that trusted its input answered
+     * `?date=banana` with a 500: `Intl.DateTimeFormat` throws RangeError on an
+     * Invalid Date, and a heading is not worth failing a download over.
+     */
     const [y, m, d] = opts.date.split('-').map(Number);
     const when = new Date(Date.UTC(y, (m || 1) - 1, d || 1, 12));
-    bits.push(`Shipped on ${shortDate(when)} ${y}`);
+    if (Number.isFinite(when.getTime())) bits.push(`Shipped on ${shortDate(when)} ${y}`);
   }
   return bits.join(' · ');
 }

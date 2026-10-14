@@ -40,7 +40,18 @@ export function BusyDatabase({
   /** What to do to try again. Different per boundary; see each error.tsx. */
   onRetry: () => void;
 }) {
-  const [, setTick] = useState(0);
+  /*
+   * `tick` IS A DEPENDENCY, and that is the whole mechanism.
+   *
+   * The timer below calls `setTick` to schedule the next attempt — but a state
+   * update does not re-run an effect whose dependency list has not changed,
+   * and `onRetry` never changes identity (it is a `useCallback` over a stable
+   * router and a stable `reset`). With `[onRetry]` alone, exactly ONE timer
+   * was ever armed: the page tried once at three seconds, and then said
+   * "Trying again…" for ever while doing nothing — which is the bug this file
+   * exists to fix, reproduced by the fix itself.
+   */
+  const [tick, setTick] = useState(0);
   const [trying, setTrying] = useState(true);
 
   useEffect(() => {
@@ -63,7 +74,7 @@ export function BusyDatabase({
     }, delay);
 
     return () => clearTimeout(timer);
-  }, [onRetry]);
+  }, [onRetry, tick]);
 
   return (
     <div className="px-4 pb-10 pt-[18px]">
