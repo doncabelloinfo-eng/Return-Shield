@@ -1005,6 +1005,82 @@ Courier is exact at 600/1000 of an em; the other two are estimated on the
 generous side, so a long line is cut a character early rather than running into
 the column beside it.
 
+## 6h. What `be756c9` got wrong
+
+Four of the five things above were right. These were not, and all four were
+found in the one place this session could not reach: a real build and a real
+browser.
+
+### A type error stopped the deploy
+
+```
+./app/api/parcels/export/route.ts:88:27
+Type error: Argument of type 'Buffer<ArrayBufferLike>' is not assignable to
+parameter of type 'BodyInit | null | undefined'.
+```
+
+934 tests passed on that commit. Nothing in the suite could have caught it: the
+export route's own tests call `GET` and read the bytes back, and at runtime a
+Buffer is a perfectly good response body. `BodyInit` wants a
+`Uint8Array<ArrayBuffer>`; a Node Buffer is a `Uint8Array<ArrayBufferLike>`,
+because it may be a view onto a shared pool. `new Uint8Array(file)` is the
+typed-array overload, so it copies exactly these bytes.
+
+`tests/typecheck.test.ts` now runs TypeScript's own compiler over the project
+inside the suite. It is the slowest test by a wide margin and it stands in for
+the half of `next build` that needs no database.
+
+### "Trying again…" never did
+
+`reset()` re-renders the error boundary from the payload that already failed.
+It does not go back to the server. So with the database restarted the screen
+stayed on the error page, and so did the Try again button; only a browser
+reload brought it back. The retry is now
+`startTransition(() => { router.refresh(); reset(); })` — refresh fetches,
+reset drops the error so the fresh payload can render.
+
+And it tried **once**, three seconds in, which is almost always three seconds
+too early: the database is usually still down. It now tries eight times, at
+three seconds and then every four, so the screen comes back within about four
+seconds of the database — and then stops, because a page left open on a genuine
+failure must not ask for ever.
+
+### The error the operator actually hits was landing on `global-error`
+
+`app/(panel)/error.tsx` catches a page. It cannot catch the LAYOUT that page
+sits in: Next sends a layout's error to the parent segment's boundary. The
+panel layout is where `requireUser()` runs the session lookup behind digest
+3880840699 — so the common case fell past it, and with no `app/error.tsx` it
+fell all the way to `global-error`, which replaces the document: no stylesheet,
+no theme, no router. There is now an `app/error.tsx`, and `global-error` is the
+last resort it was meant to be, with a reload-based retry that counts its
+attempts in `sessionStorage` so a database that stays down cannot put the tab
+in a reload loop.
+
+### Twenty-five seconds to the error page
+
+The retry wrappers composed. The panel layout retried a loader that retried;
+`parcelsView` retries and calls `closureCount`, which retries. Three levels of
+four attempts is sixty-four goes at the database and fifty-two seconds of
+waiting, aimed at the one resource that had just run out.
+
+`withDbRetry` is now re-entrant: the outermost call owns the retry and every
+call inside it is a pass-through, through `AsyncLocalStorage` rather than a
+module flag — one instance serves several requests at once, and a flag would
+let one request's retry silence another's. Measured on the compiled module:
+four attempts, three log lines, 2,507ms. The layout also stopped wrapping its
+whole `Promise.all`, which turned one refusal into four re-run queries.
+
+### The release window was measured from the wrong end
+
+`armIdleRelease()` armed one six-second timer at a request's **first**
+`getDb()` and ignored every call after it. Any request whose last query came
+more than a second after its first — a page render, a cron run, a sweep, an
+export — left its connection idle after the window had closed, and the
+instance could be suspended still holding it. Which is the entire thing it
+exists to prevent. The wait is now re-checked against the last use, so a later
+query extends the window instead of opening a second one.
+
 ## 7. Where I departed from the prototype
 
 The prototype is the specification, and I ported it. These are the places I did

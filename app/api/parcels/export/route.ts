@@ -85,7 +85,19 @@ export async function GET(req: Request): Promise<NextResponse> {
     at,
   });
 
-  return new NextResponse(file, {
+  /*
+   * `new Uint8Array(file)`, not `file`.
+   *
+   * A Node `Buffer` is a `Uint8Array<ArrayBufferLike>`, and `BodyInit` wants a
+   * `Uint8Array<ArrayBuffer>` — so passing the Buffer straight in compiles
+   * under a bare `tsc` with no DOM/undici types in sight and fails
+   * `next build`, which is how this reached a commit that could not deploy.
+   * The copy is cheap and it is the overload that takes a typed array, so it
+   * copies exactly these bytes rather than the whole pooled allocation a
+   * Buffer may be a slice of. tests/typecheck.test.ts is what catches the
+   * class.
+   */
+  return new NextResponse(new Uint8Array(file), {
     headers: {
       'Content-Type': 'application/pdf',
       'Content-Disposition': `attachment; filename="${pdfFilename(view.tab.en, at)}"`,

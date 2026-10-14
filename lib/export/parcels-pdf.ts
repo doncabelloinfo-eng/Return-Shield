@@ -93,8 +93,11 @@ export const COLUMNS: readonly Column[] = [
   {
     header: 'Status',
     width: 128,
+    // Two lines for the English label too: several of them are a phrase, not
+    // a word — "Pre-admission (label made, nothing from Correos)" — and it was
+    // being cut to "Pre-admission (label made,…".
     lines: (r) => [
-      { text: r.status.en },
+      { text: r.status.en, wrap: 2 },
       ...(r.status.es ? [{ text: r.status.es, grey: 0.45, small: true, wrap: 2 }] : []),
     ],
   },

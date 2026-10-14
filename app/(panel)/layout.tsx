@@ -27,19 +27,20 @@ export default async function PanelLayout({ children }: { children: React.ReactN
    * rows are stamped from the offset clock, and reading one against the system
    * clock would make a working engine look stopped.
    *
-   * All four are reads, so one `withDbRetry` around the lot is safe and is the
-   * cheapest place to put it: this layout wraps EVERY panel screen, so a
-   * pooler that was full for a quarter of a second now costs a beat here
-   * instead of "Application error" on whichever of these four lost the race.
-   * `todoCount` replaced `loadRows()`, which loaded every shipment in the
-   * database to produce one integer — see lib/views/todo.ts.
+   * ONE RETRY PER LOADER, not one around all four. This layout wraps every
+   * panel screen, so a pooler that is full for a quarter of a second costs a
+   * beat here instead of "Application error" on whichever of these lost the
+   * race — but wrapping the whole `Promise.all` meant a single refusal re-ran
+   * all four, which is sixteen connection attempts against the resource that
+   * had just run out. `todoCount` brings its own retry (lib/views/todo.ts),
+   * and `withDbRetry` is re-entrant, so nothing here can nest.
    */
-  const [ticker, todo, health, sweep] = await withDbRetry('panel layout', () => Promise.all([
-    recentActivity(24),
+  const [ticker, todo, health, sweep] = await Promise.all([
+    withDbRetry('recent activity', () => recentActivity(24)),
     todoCount(),
-    engineHealth(),
-    sweepStatus(),
-  ]));
+    withDbRetry('engine health', () => engineHealth()),
+    withDbRetry('sweep status', () => sweepStatus()),
+  ]);
 
   const at = now();
   const f = fmt(at);

@@ -196,9 +196,10 @@ export function cronRoute(
       // invocations. But the pool is a module-level singleton shared by every
       // request in the instance (db/index.ts), and a cron route can land on an
       // instance that is also serving pages — so closing it took the
-      // connection out from under them. `idle_timeout: 20` in db/index.ts is
-      // the mechanism that drains an idle pool, and it needs no help from a
-      // request. See tests/pool-lifetime.test.ts.
+      // connection out from under them. The five-second `idle_timeout` drains
+      // an idle pool, and `armIdleRelease` holds the instance awake long
+      // enough for it to fire. Neither needs help from a request. See
+      // tests/pool-lifetime.test.ts.
     }
   };
 }

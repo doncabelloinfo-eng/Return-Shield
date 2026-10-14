@@ -1,7 +1,12 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
-  RETRY_DELAYS_MS, armIdleRelease, idleReleaseArmed, isConnectionRefusal, withDbRetry,
+  RETRY_DELAYS_MS, armIdleRelease, idleReleaseArmed, isConnectionRefusal, retryableRead,
+  withDbRetry,
 } from '@/db';
+import {
+  NEW_INCIDENT_AFTER_MS, RETRY_ATTEMPTS, RETRY_EVERY_MS, RETRY_FIRST_MS, attemptsSoFar,
+  nextErrorRetryMs,
+} from '@/lib/error-retry';
 import { IDLE_POLL_MS, SWEEP_POLL_MS, nextPollDelay } from '@/lib/poll-schedule';
 
 /**
@@ -41,6 +46,14 @@ import { IDLE_POLL_MS, SWEEP_POLL_MS, nextPollDelay } from '@/lib/poll-schedule'
  */
 
 afterEach(() => { vi.restoreAllMocks(); });
+
+const sleep = (ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms); });
+
+/** Verbatim what Supabase's session pooler says when it is full. */
+const poolerFull = () => Object.assign(
+  new Error('max clients reached in session mode - max clients are limited to pool_size: 15'),
+  { code: 'XX000' },
+);
 
 /* ========================================================== what is refused */
 
@@ -92,11 +105,6 @@ describe('a refused connection', () => {
 /* ================================================================ the retry */
 
 describe('a read that was refused a connection', () => {
-  const poolerFull = () => Object.assign(
-    new Error('max clients reached in session mode - max clients are limited to pool_size: 15'),
-    { code: 'XX000' },
-  );
-
   it('is tried again, and the page renders', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     let calls = 0;
@@ -153,6 +161,70 @@ describe('a read that was refused a connection', () => {
   it('does not wrap a value in anything when nothing went wrong', async () => {
     expect(await withDbRetry('fine', async () => 7)).toBe(7);
   });
+
+  it('retries at ONE level, however deeply the wrappers nest', async () => {
+    /*
+     * The twenty-five seconds. Measured in Chromium against a built server:
+     * with the pooler refusing, the error page took 25 seconds to appear,
+     * because these wrappers compose. The panel layout retried a loader that
+     * retried; `parcelsView` retries and calls `closureCount`, which retries.
+     * Three levels of four attempts is 64 goes at the database and 52 seconds
+     * of waiting, against the one resource that had just run out.
+     */
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    let leafCalls = 0;
+
+    const leaf = retryableRead('leaf', async () => {
+      leafCalls += 1;
+      throw poolerFull();
+    });
+    const middle = retryableRead('middle', async () => leaf());
+
+    const started = Date.now();
+    await expect(withDbRetry('outer', () => middle())).rejects.toThrow(/max clients/);
+    const took = Date.now() - started;
+
+    // Four goes at the body, not four cubed.
+    expect(leafCalls).toBe(RETRY_DELAYS_MS.length + 1);
+    // And one log line per wait, from the outermost level only.
+    expect(warn).toHaveBeenCalledTimes(RETRY_DELAYS_MS.length);
+
+    // 250 + 750 + 1500. The worst case before the error page, not 25 seconds.
+    const budget = RETRY_DELAYS_MS.reduce((a, b) => a + b, 0);
+    expect(budget).toBe(2_500);
+    expect(took).toBeGreaterThanOrEqual(budget - 150);
+    expect(took).toBeLessThan(budget + 1_500);
+  }, 20_000);
+
+  it('still retries a loader called on its own', async () => {
+    // The pass-through is scoped to one async path, not global: a loader
+    // outside anybody else's retry is still retried.
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    let calls = 0;
+    const leaf = retryableRead('alone', async () => {
+      calls += 1;
+      if (calls < 3) throw poolerFull();
+      return 'rows';
+    });
+
+    expect(await leaf()).toBe('rows');
+    expect(calls).toBe(3);
+  }, 20_000);
+
+  it('does not let one request\'s retry silence another\'s', async () => {
+    // Two requests on one instance, overlapping. A module-level flag would
+    // have made the second a pass-through; AsyncLocalStorage keeps them apart.
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const calls = [0, 0];
+    const run = (i: number) => withDbRetry(`request ${i}`, async () => {
+      calls[i] += 1;
+      if (calls[i] < 2) throw poolerFull();
+      return i;
+    });
+
+    expect(await Promise.all([run(0), run(1)])).toEqual([0, 1]);
+    expect(calls).toEqual([2, 2]);
+  }, 20_000);
 });
 
 /* ================================================ giving connections back */
@@ -194,6 +266,48 @@ describe('the window that lets the pool let go', () => {
     expect(idleReleaseArmed()).toBe(false);
   }, 10_000);
 
+  it('stays open until idle_timeout after the LAST query, not the first', async () => {
+    /*
+     * The leak this was supposed to stop, left in place by the first version.
+     *
+     * It armed ONE six-second timer at a request's first `getDb()` and ignored
+     * every call after it, so any request whose last query came more than a
+     * second after its first — a page render (Vercel's P75 time to first byte
+     * here is three seconds), a cron run, a sweep, an export — left its
+     * connection idle after the window had already closed, and the instance
+     * could be suspended still holding it.
+     *
+     * Written with a one-second `DB_IDLE_TIMEOUT` so the test takes seconds
+     * rather than tens of them. At the production five it is the same shape:
+     * a query four seconds in holds the window to ten seconds.
+     */
+    process.env.DB_IDLE_TIMEOUT = '1';
+    const held: Promise<unknown>[] = [];
+    (globalThis as Record<symbol, unknown>)[SYMBOL] = {
+      get: () => ({ waitUntil: (p: Promise<unknown>) => { held.push(p); } }),
+    };
+
+    let settled = false;
+    armIdleRelease();
+    void held[0].then(() => { settled = true; });
+
+    await sleep(1_200);
+    armIdleRelease();
+    expect(settled).toBe(false);
+
+    // Past the point where the FIRST query's window would have closed. The old
+    // version resolved here and let the instance sleep on the connection.
+    await sleep(1_000);
+    expect(settled).toBe(false);
+    expect(idleReleaseArmed()).toBe(true);
+    // Extended, not duplicated: still one window for the instance.
+    expect(held).toHaveLength(1);
+
+    await sleep(1_600);
+    expect(settled).toBe(true);
+    expect(idleReleaseArmed()).toBe(false);
+  }, 20_000);
+
   it('survives a runtime whose waitUntil throws', () => {
     (globalThis as Record<symbol, unknown>)[SYMBOL] = {
       get: () => ({ waitUntil: () => { throw new Error('not supported here'); } }),
@@ -222,5 +336,58 @@ describe('how often the browser asks about the sweep', () => {
     // The bar has to look live. This is the one case worth the requests.
     expect(nextPollDelay({ sweeping: true, hidden: false })).toBe(SWEEP_POLL_MS);
     expect(SWEEP_POLL_MS).toBe(1_500);
+  });
+});
+
+/* ====================================================== the error page */
+
+describe('when the error page tries again by itself', () => {
+  it('waits three seconds, then every four', () => {
+    expect(nextErrorRetryMs(0)).toBe(RETRY_FIRST_MS);
+    expect(RETRY_FIRST_MS).toBe(3_000);
+    for (let attempt = 1; attempt < RETRY_ATTEMPTS; attempt += 1) {
+      expect(nextErrorRetryMs(attempt)).toBe(RETRY_EVERY_MS);
+    }
+    expect(RETRY_EVERY_MS).toBe(4_000);
+  });
+
+  it('keeps trying, which is the whole bug', () => {
+    /*
+     * It tried once, three seconds in, and stopped. Measured in Chromium
+     * against a built server: the page appeared with Postgres down, Postgres
+     * came back, and eight seconds later the screen was still the error page —
+     * the single attempt had been and gone while the database was still down.
+     * Pressing the button did not help either, because `reset()` on its own
+     * re-renders the payload that already failed; that half is fixed in
+     * app/error.tsx.
+     */
+    const made: number[] = [];
+    for (let attempt = 0; ; attempt += 1) {
+      const delay = nextErrorRetryMs(attempt);
+      if (delay === null) break;
+      made.push(delay);
+    }
+    expect(made.length).toBeGreaterThan(1);
+    expect(made).toHaveLength(RETRY_ATTEMPTS);
+    // Recovery lands within about four seconds of the database's, for about
+    // the first half minute.
+    expect(made.reduce((a, b) => a + b, 0)).toBeGreaterThan(30_000);
+  });
+
+  it('stops, so a page left open on a real failure is not asking for ever', () => {
+    expect(nextErrorRetryMs(RETRY_ATTEMPTS)).toBeNull();
+    expect(nextErrorRetryMs(RETRY_ATTEMPTS + 50)).toBeNull();
+    expect(nextErrorRetryMs(-1)).toBeNull();
+    expect(nextErrorRetryMs(Number.NaN)).toBeNull();
+  });
+
+  it('counts a long gap as a new incident, and a short one as the same', () => {
+    // The count lives outside the component — the boundary re-renders its
+    // fallback, and global-error reloads the document — so it needs telling
+    // when to start from zero again.
+    const now = 1_760_000_000_000;
+    expect(attemptsSoFar(4, now - 1_000, now)).toBe(4);
+    expect(attemptsSoFar(4, now - NEW_INCIDENT_AFTER_MS - 1, now)).toBe(0);
+    expect(attemptsSoFar(4, 0, now)).toBe(0);
   });
 });

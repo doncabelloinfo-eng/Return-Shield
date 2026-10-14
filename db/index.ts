@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { sql, type SQL } from 'drizzle-orm';
 import { drizzle, type PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
@@ -220,23 +221,47 @@ function idleTimeoutMs(): number {
 
 /** One pending window per instance, however many requests arrive inside it. */
 let releasing: Promise<void> | null = null;
+/** When the pool was last asked for. The window is measured from THIS. */
+let lastUsedAt = 0;
 
 export function armIdleRelease(): void {
+  lastUsedAt = Date.now();
   if (releasing) return;
   const waitUntil = requestContext()?.waitUntil;
   if (!waitUntil) return;
 
-  // A second of slack on top of `idle_timeout`, so the timer has actually
-  // fired and the socket has gone before the instance is allowed to sleep.
-  releasing = new Promise<void>((resolve) => {
-    setTimeout(resolve, idleTimeoutMs() + 1_000);
-  }).finally(() => { releasing = null; });
+  releasing = holdUntilIdle().finally(() => { releasing = null; });
 
   try {
     waitUntil(releasing);
   } catch {
     // An older runtime without waitUntil. The pool behaves as it did before.
     releasing = null;
+  }
+}
+
+/**
+ * Resolve once `idle_timeout` has passed since the LAST query, not the first.
+ *
+ * The first version of this armed a single six-second timer at a request's
+ * first `getDb()` and ignored every call after it, which meant any request
+ * whose last query came more than a second after its first — a page render
+ * (Vercel's P75 time to first byte here is three seconds), a cron run, a
+ * sweep, an export — left its connection idle AFTER the window had closed.
+ * The instance could then be suspended still holding it, which is the whole
+ * thing this exists to prevent.
+ *
+ * So the wait is re-checked against `lastUsedAt` each time it elapses. Still
+ * one window per instance: a later query extends it rather than opening a
+ * second one. A second of slack on top of `idle_timeout`, so postgres.js' own
+ * timer has actually fired and the socket has gone before the instance is
+ * allowed to sleep.
+ */
+async function holdUntilIdle(): Promise<void> {
+  for (;;) {
+    const left = (lastUsedAt + idleTimeoutMs() + 1_000) - Date.now();
+    if (left <= 0) return;
+    await new Promise<void>((resolve) => { setTimeout(resolve, left); });
   }
 }
 
@@ -290,7 +315,29 @@ export const RETRY_DELAYS_MS = [250, 750, 1_500] as const;
  * between a page that renders a beat late and "Application error: a
  * server-side exception has occurred".
  */
+const retrying = new AsyncLocalStorage<true>();
+
 export async function withDbRetry<T>(label: string, run: () => Promise<T>): Promise<T> {
+  /*
+   * ONE LEVEL, WHOEVER NESTS WHOM.
+   *
+   * These wrappers compose: a page retries a loader that retries, or a loader
+   * calls another loader that is itself retryable — `parcelsView` calls
+   * `closureCount`. Each level multiplied the one below it, so against a
+   * pooler that kept refusing, the waits compounded into twenty-five seconds
+   * before the error page appeared, with sixteen connection attempts hammering
+   * the very resource that was exhausted.
+   *
+   * The outermost call owns the retry and every call inside it is a
+   * pass-through. AsyncLocalStorage rather than a module flag because one
+   * instance serves several requests at once, and a flag would let one
+   * request's retry silence another's.
+   */
+  if (retrying.getStore()) return run();
+  return retrying.run(true, () => attemptWithRetries(label, run));
+}
+
+async function attemptWithRetries<T>(label: string, run: () => Promise<T>): Promise<T> {
   for (let attempt = 0; ; attempt += 1) {
     try {
       return await run();
