@@ -27,9 +27,24 @@ export function verifyShopifyHmac(rawBody: Buffer | string, headerHmac: string |
   return provided.length === digest.length && timingSafeEqual(provided, digest);
 }
 
-/** The per-store secret. Store key `main-store` reads SHOPIFY_MAIN_STORE_*. */
-export function storeEnv(storeKey: string, suffix: 'WEBHOOK_SECRET' | 'ACCESS_TOKEN' | 'SHOP_DOMAIN'): string | undefined {
-  const key = `SHOPIFY_${storeKey.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}_${suffix}`;
+export type StoreEnvSuffix =
+  | 'WEBHOOK_SECRET' | 'ACCESS_TOKEN' | 'SHOP_DOMAIN' | 'ORDER_SOURCES';
+
+/**
+ * The variable name for one store's setting. Store key `main-store` reads
+ * SHOPIFY_MAIN_STORE_*.
+ *
+ * Exported because the operator reads these names out of docs/deploying.md and
+ * types them into Vercel: the convention has to live in one place or the docs
+ * and the code drift apart.
+ */
+export function storeEnvName(storeKey: string, suffix: StoreEnvSuffix): string {
+  return `SHOPIFY_${storeKey.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}_${suffix}`;
+}
+
+/** The per-store secret. */
+export function storeEnv(storeKey: string, suffix: StoreEnvSuffix): string | undefined {
+  const key = storeEnvName(storeKey, suffix);
   // `env`, so a key added with no value reads as absent. An empty webhook
   // secret would otherwise verify an HMAC against the empty string, and an
   // empty access token would have the backfill authenticate with nothing and

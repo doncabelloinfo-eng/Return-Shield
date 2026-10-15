@@ -52,6 +52,11 @@ function order(
   return {
     id: 1000 + n,
     name: `#${2000 + n}`,
+    // Every real Shopify order carries one, and since the channel check went
+    // in (lib/carriers/shopify/channel.ts) an order with no `source_name` and
+    // no `app_id` is not ours to take — so a fixture without it would be
+    // testing the rejection path by accident.
+    source_name: 'web',
     created_at: '2026-10-01T09:00:00Z',
     total_price: '44.90',
     shipping_address: { name: `Customer ${n}`, phone: '+34600111222', city: 'Madrid' },
@@ -183,6 +188,12 @@ describe('what it keeps', () => {
     // They carry PKA6TP… codes with no carrier name, so `isCorreos` does not
     // recognise them — deliberately, because they come in through the file
     // upload and recognising them here would ingest them twice.
+    //
+    // There is a second guard now, in front of this one: a TikTok-channel
+    // order is refused by `source_name` and by its TikTokOrderID tag before
+    // its fulfilments are ever looked at. See tests/shopify-channel.test.ts.
+    // This order keeps `source_name: 'web'` so it is still THIS test's
+    // question that decides it.
     const { fetchImpl } = shopify([{
       orders: [{
         ...order(9),

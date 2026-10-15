@@ -241,6 +241,44 @@ Pick a key with no punctuation and the two always match.
 | `SHOPIFY_<KEY>_WEBHOOK_SECRET` | Its webhooks are rejected. An unverified webhook writes to the order table, so rejecting is the safe default. |
 | `SHOPIFY_<KEY>_ACCESS_TOKEN` | The hourly backfill skips that store, so a lost webhook is never recovered. |
 | `SHOPIFY_<KEY>_SHOP_DOMAIN` | Optional if `stores.shop_domain` is set on the row below. |
+| `SHOPIFY_<KEY>_ORDER_SOURCES` | Optional. Which channels orders may come from, as a comma list of Shopify `source_name` values. Unset means `web,shopify_draft_order` — the Online Store and Draft Orders. |
+
+##### Only the Online Store and Draft Orders
+
+`doncabello` has the TikTok sales channel installed, so every TikTok Shop order
+is also a Shopify order: 235 of the store's last 250, against 12 from the
+Online Store and 3 Draft Orders. Taking them from Shopify put the parcel under
+**Don Cabello Profesional** with a #22xxx Shopify order number — and because a
+shipment is unique by tracking code and the webhook fires at fulfilment,
+Shopify usually got there first, so the TikTok upload then skipped the row as a
+duplicate and the parcel never appeared under **TikTok Shop ES**, which is the
+filter the TikTok Shop team works from.
+
+So one check at the top of `ingestShopifyOrder` — the function the webhook, the
+hourly backfill and the thirty-day pull all go through — decides whether an
+order is ours to take:
+
+- its `source_name` must be in this store's allowlist, which defaults to `web`
+  and `shopify_draft_order`;
+- with no `source_name`, its `app_id` decides (`580111` is the Online Store,
+  `1354745` is Draft Orders);
+- and an order tagged `TikTokOrderID:<digits>` is never taken, whatever its
+  `source_name` says.
+
+A rejected order writes nothing — no order row, no shipment, no ticker line —
+and the webhook still answers 200, so Shopify neither retries it nor turns the
+webhook off. The pull reports them: "41 TikTok orders skipped, they come from
+the TikTok upload".
+
+Shopify puts a bare app id in `source_name` for an app with no named channel
+(`2329312` and `3890849`, once each on this store). Those are left out by
+default; if one turns out to be a real channel, add the number to the list.
+
+**The orders already pulled in** are moved back by a button on Settings →
+Shopify, "TikTok orders pulled from Shopify": it previews, then re-points each
+parcel at its TikTok order — keeping the shipment row, so its events, contact
+log and state survive — and removes the emptied Shopify order rows. It is safe
+to press twice. See `lib/orders/tiktok-handover.ts`.
 
 #### 1. The store row
 

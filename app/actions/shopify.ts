@@ -6,6 +6,10 @@ import { getDb } from '@/db';
 import { stores } from '@/db/schema';
 import { requireUser } from '@/lib/auth/guard';
 import { pullStore, type PullReport } from '@/lib/carriers/shopify/pull';
+import {
+  applyTikTokHandover, previewTikTokHandover,
+  type HandoverPreview, type HandoverResult,
+} from '@/lib/orders/tiktok-handover';
 
 /**
  * "Pull the last 30 days", per Shopify store.
@@ -55,3 +59,60 @@ export async function pullShopifyHistory(storeKey: string): Promise<PullResult> 
  */
 // (not re-exported from here: a "use server" file may only export async
 // functions, so the one import site reaches for it directly.)
+
+/* ------------------------------------- the TikTok orders already pulled in */
+
+/*
+ * Re-exported so the component imports one module rather than two. Type-only,
+ * which a `'use server'` file is allowed to export — see
+ * tests/use-server-exports.test.ts, which is the guard for the day a value
+ * export here crashed every screen.
+ */
+export type { HandoverPreview, HandoverResult };
+
+export interface HandoverPreviewResult {
+  ok: boolean;
+  error?: string;
+  preview?: HandoverPreview;
+}
+
+export interface HandoverApplyResult {
+  ok: boolean;
+  error?: string;
+  result?: HandoverResult;
+}
+
+/**
+ * "What would move?" Nothing is written.
+ *
+ * Separate from the apply because this one is safe to press out of curiosity,
+ * and because the operator should see the three numbers before committing to
+ * them — the numbers come from the same query the apply uses, so what the
+ * preview promises is what the apply does. See lib/orders/tiktok-handover.ts.
+ */
+export async function previewTikTokOrders(): Promise<HandoverPreviewResult> {
+  await requireUser();
+  try {
+    return { ok: true, preview: await previewTikTokHandover() };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : 'Could not read the orders.' };
+  }
+}
+
+/**
+ * Move them: each parcel to its TikTok order, each emptied Shopify row gone.
+ *
+ * Safe to press twice — the second press finds nothing, because the rows it
+ * works from are Shopify orders carrying a TikTok tag and it has just removed
+ * them all.
+ */
+export async function moveTikTokOrders(): Promise<HandoverApplyResult> {
+  await requireUser();
+  try {
+    const result = await applyTikTokHandover();
+    revalidatePath('/', 'layout');
+    return { ok: true, result };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : 'The move did not finish.' };
+  }
+}

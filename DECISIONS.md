@@ -1198,6 +1198,87 @@ and asserts the fifth is no slower than the first, because one read in
 isolation never showed this: it is the shared counter that makes the second
 page load the slow one.
 
+## 6k. Only the Online Store and Draft Orders, and giving TikTok its orders back
+
+The TikTok sales channel is installed on `doncabellopro`, so every TikTok Shop
+order is also a Shopify order. Checked against the Admin API: of the store's
+last 250 orders, **235 came from the TikTok channel**, 12 from the Online Store
+and 3 from Draft Orders.
+
+Return Shield took them all. A shipment is unique by its tracking code, so
+whichever source arrived first owned the parcel — and the webhook fires at
+fulfilment, so Shopify usually won. The parcel then sat under **Don Cabello
+Profesional** with a #22xxx Shopify order number, the TikTok upload skipped it
+as a duplicate, and it never appeared under **TikTok Shop ES**, which is the
+filter the TikTok Shop team works from. 92 consecutive order numbers of that
+store's 213 parcels were in that state. The other way round — upload first —
+left an `orders` row under the Shopify shop with no parcel at all.
+
+### The check is one check
+
+At the top of `ingestShopifyOrder`, which is the one function the webhook, the
+hourly backfill and the thirty-day pull all go through. Three checks in three
+places is a check one of them will be missing.
+
+An order is ours if its `source_name` is in the store's allowlist — `web` and
+`shopify_draft_order` by default, per store in
+`SHOPIFY_<KEY>_ORDER_SOURCES`. With no `source_name` its `app_id` decides
+(`580111` is the Online Store, `1354745` is Draft Orders). And an order
+carrying a `TikTokOrderID:` tag is never ours, whatever its `source_name`
+says.
+
+Three details worth the words:
+
+- **A refused order writes nothing.** No `orders` row, no shipment, no ticker
+  line — the tests assert the absence rather than a flag, because a row
+  written and hidden is the same bug by another route.
+- **The webhook still answers 200.** Shopify retries a failed delivery for
+  days and disables a webhook after enough of them, and there is nothing wrong
+  with the delivery: we simply do not want the order. A 422 would eventually
+  cost us the webhook that brings the Online Store orders in.
+- **The tag is judged on presence, not readability.** `TikTokOrderID:` with
+  nothing after the colon still means the TikTok channel wrote it. Refusing it
+  is a visible failure — the pull counts and reports it — while taking it is
+  the invisible one.
+
+Shopify also puts a bare app id in `source_name` for an app with no named
+channel; `2329312` and `3890849` turned up once each. Those are left out, and
+an operator who finds one is a real channel can paste the number into the
+variable.
+
+### And the 96 already in
+
+A Settings action rather than a SQL migration, because it needs a dry run, it
+has to be safe to press twice, and the person pressing it is the operator's
+assistant in a browser. Settings → Shopify → "TikTok orders pulled from
+Shopify": it previews ("TikTok orders pulled from Shopify: 96. Parcels to move
+to TikTok Shop ES: 81. Empty Shopify rows to remove: 15"), then moves them.
+
+**The shipment row moves; it is never recreated.** Its id is what the events,
+the contact log, the tasks and the closures all hang off, so recreating it
+would throw away the parcel's whole tracking history — which is the reason the
+system exists. The Shopify order row then goes, and the guard on that delete is
+load-bearing: `shipments.order_id` is ON DELETE CASCADE, so deleting the order
+before the parcel has moved would delete the parcel.
+
+One transaction per order, so a failure halfway leaves earlier orders finished,
+later ones untouched, and no parcel without an order. Everything inside uses
+the transaction handle: with `DB_POOL_MAX=1` a `getDb()` call in there would
+ask the pool for a second connection while the transaction holds the only one
+and wait for itself until `connect_timeout`. That is also why the ticker line
+is written after the loop — `say()` takes its own connection.
+
+The preview and the apply run **one** query between them. The preview promises
+the operator a number and the apply has to produce it; two queries that agree
+today are two queries that disagree the first time somebody edits one.
+
+The money comes across with the parcel — value, currency and payment method —
+because it is the same money, and it is what the escalation engine ranks by. A
+parcel rewritten as €0 would sink to the bottom of the list it was moved onto.
+Everything else is as the TikTok upload writes it: the TikTok id as both order
+number and external id, an empty name, no phone, email or address, and no
+order date.
+
 ## 7. Where I departed from the prototype
 
 The prototype is the specification, and I ported it. These are the places I did

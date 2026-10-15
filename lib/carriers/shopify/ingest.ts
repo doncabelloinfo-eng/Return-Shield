@@ -5,6 +5,7 @@ import { normalisePhone } from '@/lib/import/phone';
 import { parseMoneyCents } from '@/lib/import/parse';
 import { now } from '@/lib/clock';
 import { say } from '@/lib/activity';
+import { verdictFor, type ChannelVerdict } from './channel';
 
 /**
  * Turning a Shopify `orders/fulfilled` payload into an order and a shipment.
@@ -30,6 +31,13 @@ export interface ShopifyFulfilment {
 export interface ShopifyOrderPayload {
   id?: number | string;
   name?: string | null;
+  /**
+   * Which channel sold it: `web`, `shopify_draft_order`, `tiktok`, or the bare
+   * app id for an app with no named channel. See ./channel.ts.
+   */
+  source_name?: string | null;
+  /** The selling app, for the orders that carry no `source_name`. */
+  app_id?: number | string | null;
   order_number?: number | string | null;
   email?: string | null;
   phone?: string | null;
@@ -51,8 +59,10 @@ export interface ShopifyOrderPayload {
 }
 
 export interface IngestOrderResult {
-  status: 'created' | 'existing' | 'not_correos' | 'no_tracking';
+  status: 'created' | 'existing' | 'not_correos' | 'no_tracking' | 'other_channel';
   shipmentIds: string[];
+  /** Set when the status is `other_channel`. Why it was not taken. */
+  channel?: ChannelVerdict;
 }
 
 export function isCorreos(f: ShopifyFulfilment): boolean {
@@ -83,6 +93,17 @@ export async function ingestShopifyOrder(
   payload: ShopifyOrderPayload,
   opts: IngestOrderOptions = {},
 ): Promise<IngestOrderResult> {
+  /*
+   * THE CHANNEL CHECK, FIRST, BEFORE ANYTHING IS READ OR WRITTEN.
+   *
+   * Here rather than in the webhook and the backfill and the pull, because all
+   * three come through this function and a check in three places is a check
+   * one of them will be missing. A rejected order writes nothing at all: no
+   * order row, no shipment, no ticker line. See ./channel.ts for why.
+   */
+  const channel = verdictFor(storeKey, payload);
+  if (!channel.accept) return { status: 'other_channel', shipmentIds: [], channel };
+
   const [store] = await getDb().select().from(stores).where(eq(stores.key, storeKey)).limit(1);
   if (!store) throw new Error(`shopify: no store configured with key "${storeKey}"`);
 

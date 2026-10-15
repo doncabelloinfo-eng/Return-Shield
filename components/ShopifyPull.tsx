@@ -50,6 +50,13 @@ export function ShopifyPull({
         `${r.alreadyHad} already here`,
         `${r.notCorreos} not Correos`,
       ];
+      if (r.tiktokOrders) {
+        said.push(`${r.tiktokOrders} TikTok orders skipped, they come from the TikTok upload`);
+      }
+      if (r.otherChannel) {
+        said.push(`${r.otherChannel} skipped from other channels — only the Online Store and `
+          + 'Draft Orders are taken from Shopify');
+      }
       if (r.outsideWindow) said.push(`${r.outsideWindow} posted before the window`);
       if (r.stoppedEarly) said.push(`stopped early: ${r.stoppedEarly}`);
       setLines(said);
@@ -103,7 +110,8 @@ export function ShopifyPull({
         <div className="mt-[6px] max-w-[560px] text-[11.5px] leading-[1.5] text-muted">
           Reads every page of the last {windowDays} days and adds any Correos parcel that is
           missing. Nothing older, because the nightly cleanup would delete it the same night.
-          Safe to press twice, and this is also how a new shop gets its history.
+          Safe to press twice, and this is also how a new shop gets its history. Only Online
+          Store and Draft Orders are taken — TikTok Shop orders come from the TikTok upload.
         </div>
       )}
     </div>

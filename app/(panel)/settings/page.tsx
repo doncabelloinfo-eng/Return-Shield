@@ -2,6 +2,7 @@ import { and, eq, desc, isNull } from 'drizzle-orm';
 import { getDb } from '@/db';
 import { eventReviewQueue, postcodeStats, stores } from '@/db/schema';
 import { ShopifyPull } from '@/components/ShopifyPull';
+import { TikTokHandover } from '@/components/TikTokHandover';
 import { IntegrationsPanel } from '@/components/IntegrationsPanel';
 import { SweepPanel } from '@/components/SweepPanel';
 import { JobRunsPanel } from '@/components/JobRunsPanel';
@@ -125,6 +126,12 @@ export default async function SettingsPage() {
             {shopifyStores.map((st) => (
               <ShopifyPull key={st.key} storeKey={st.key} storeName={st.name} windowDays={windowDays} />
             ))}
+            {/*
+              Next to the pull, because it is the other half of the same story:
+              the pull now leaves TikTok orders alone, and this gives back the
+              ones it already took. See lib/orders/tiktok-handover.ts.
+            */}
+            <TikTokHandover />
             <div className="px-[14px] py-3 text-[11.5px] leading-[1.5] text-muted">
               New parcels arrive on their own by webhook, and the hourly check picks up any
               whose webhook never came. This is for history: the first time a shop is

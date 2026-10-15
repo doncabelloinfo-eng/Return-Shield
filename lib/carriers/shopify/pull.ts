@@ -47,8 +47,19 @@ export interface PullReport {
   added: number;
   /** Parcels we already had. Pressing twice lands here. */
   alreadyHad: number;
-  /** Orders with no Correos fulfilment. TikTok's live here. */
+  /** Orders with no Correos fulfilment. */
   notCorreos: number;
+  /**
+   * TikTok Shop orders, left for the TikTok upload.
+   *
+   * Counted and reported rather than quietly dropped: on this store they are
+   * the great majority of the orders Shopify hands back — 235 of the last 250
+   * — so a pull that said nothing about them would look like it had found
+   * almost nothing. See lib/carriers/shopify/channel.ts.
+   */
+  tiktokOrders: number;
+  /** Orders from some other channel or app, not in the store's allowlist. */
+  otherChannel: number;
   /** Fulfilments outside the window, left alone. */
   outsideWindow: number;
   pages: number;
@@ -136,6 +147,8 @@ export async function pullStore(
     added: 0,
     alreadyHad: 0,
     notCorreos: 0,
+    tiktokOrders: 0,
+    otherChannel: 0,
     outsideWindow: 0,
     pages: 0,
     windowDays: retentionDays(),
@@ -214,6 +227,14 @@ export async function pullStore(
         fresh.push(...result.shipmentIds);
       } else if (result.status === 'existing') {
         report.alreadyHad += Math.max(1, result.shipmentIds.length);
+      } else if (result.status === 'other_channel') {
+        // `ingestShopifyOrder` wrote nothing. Which channel it was matters to
+        // the line the operator reads, so the two reasons are kept apart.
+        if (result.channel?.accept === false && result.channel.reason === 'tiktok') {
+          report.tiktokOrders += 1;
+        } else {
+          report.otherChannel += 1;
+        }
       } else {
         report.notCorreos += 1;
       }
