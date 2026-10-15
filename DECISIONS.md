@@ -1390,8 +1390,16 @@ phone and address, because the move cannot be undone and that is the one thing
 it throws away. The data still goes — the brief asked for the TikTok upload's
 shape, and TikTok's own files carry no contact details either — but the
 operator reads the number before pressing rather than discovering it on a
-parcel mid-ladder, where the escalation engine will open a "call them" task
-with no number to ring.
+parcel mid-ladder.
+
+What that costs, precisely: with `WHATSAPP_PROVIDER=none` the engine writes
+the message for a person to send, so the parcel gets a `contact` task — "Get
+in touch, nobody was home" — and a ticker line, with no number or email behind
+either, and `waHref`/`emailHref` on the row come out empty. (The "cannot
+message a missing number" path and the `call` task sit *after* the
+`if (!sendsItself)` return in lib/escalation/run.ts and are unreachable until
+a provider that can send is connected. An earlier draft of this note named
+those instead; it was wrong about the mechanism, not about the cost.)
 
 ## 7. Where I departed from the prototype
 

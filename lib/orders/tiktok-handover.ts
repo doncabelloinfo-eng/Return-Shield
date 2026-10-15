@@ -92,6 +92,7 @@ interface RawTaggedOrder {
   payment_method: 'prepaid' | 'cod' | null;
   phone_e164: string | null;
   email: string | null;
+  address_line: string | null;
 }
 
 /**
@@ -113,6 +114,7 @@ export async function taggedShopifyOrders(): Promise<TaggedOrder[]> {
            o.payment_method,
            o.phone_e164,
            o.email,
+           o.address_line,
            (SELECT count(*)::int FROM shipments s WHERE s.order_id = o.id) AS parcels
       FROM orders o
       JOIN stores st ON st.id = o.store_id
@@ -142,7 +144,10 @@ export async function taggedShopifyOrders(): Promise<TaggedOrder[]> {
     valueCents: Number(r.total_value_cents),
     currency: r.currency ?? 'EUR',
     paymentMethod: r.payment_method ?? 'prepaid',
-    hasContact: Boolean(r.phone_e164 || r.email),
+    // The address counts too, because the line on screen says "name, phone and
+    // address" — a count that ignored an order with an address and no phone
+    // would be a number that did not match the sentence beside it.
+    hasContact: Boolean(r.phone_e164 || r.email || r.address_line),
   }));
 }
 
