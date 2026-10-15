@@ -2,10 +2,11 @@
 
 import { useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
-import {
-  moveTikTokOrders, previewTikTokOrders,
-  type HandoverPreview, type HandoverResult,
-} from '@/app/actions/shopify';
+import { moveTikTokOrders, previewTikTokOrders } from '@/app/actions/shopify';
+// Type-only, so the import is erased and none of that module reaches the
+// client bundle. See the note in app/actions/shopify.ts for why they are not
+// re-exported from there.
+import type { HandoverPreview, HandoverResult } from '@/lib/orders/tiktok-handover';
 
 /**
  * "Give the TikTok orders back to TikTok Shop ES."
@@ -89,6 +90,13 @@ export function TikTokHandover() {
           <li>{`TikTok orders pulled from Shopify: ${preview.tiktokOrders}`}</li>
           <li>{`Parcels to move to TikTok Shop ES: ${preview.parcelsToMove}`}</li>
           <li>{`Empty Shopify rows to remove: ${preview.emptyRows}`}</li>
+          {preview.parcelsLosingContact > 0 && (
+            <li>
+              {`${preview.parcelsLosingContact} will lose the Shopify name, phone and address — `}
+              TikTok&rsquo;s own files carry none either, so the parcel keeps its tracking and
+              its history but not its contact details. This cannot be undone.
+            </li>
+          )}
           {preview.unreadableTags > 0 && (
             <li>{`${preview.unreadableTags} with a tag nobody can read an id out of — left alone`}</li>
           )}

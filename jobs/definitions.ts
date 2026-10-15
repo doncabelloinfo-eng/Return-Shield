@@ -854,6 +854,18 @@ export async function shopifyBackfill(): Promise<JobResult> {
 
   let created = 0;
   let checked = 0;
+  /*
+   * What the channel check left for the TikTok upload, and what it left for
+   * nobody. Reported because this path is otherwise silent about it: a refused
+   * order writes no row, no shipment and no ticker line, so without these two
+   * numbers an operator who sets SHOPIFY_<KEY>_ORDER_SOURCES wrongly — or a
+   * shop that starts selling through a channel nobody allowed — would see an
+   * hourly job reading 250 orders, reporting success and creating nothing, for
+   * ever. `otherChannel` above zero is the one to look at: TikTok is expected,
+   * a channel nobody has allowed is not.
+   */
+  let tiktokSkipped = 0;
+  let otherChannelSkipped = 0;
   const skipped: string[] = [];
 
   for (const store of shopifyStores) {
@@ -884,6 +896,8 @@ export async function shopifyBackfill(): Promise<JobResult> {
 
     checked += report.checked;
     created += report.added;
+    tiktokSkipped += report.tiktokOrders;
+    otherChannelSkipped += report.otherChannel;
     if (report.stoppedEarly) skipped.push(`${store.key} (${report.stoppedEarly})`);
   }
 
@@ -891,7 +905,7 @@ export async function shopifyBackfill(): Promise<JobResult> {
     await say(`Hourly check of Shopify found ${created} parcels whose webhook never arrived`);
   }
 
-  return { detail: { checked, created, skipped } };
+  return { detail: { checked, created, tiktokSkipped, otherChannelSkipped, skipped } };
 }
 
 /* ------------------------------------------------------------- 09:00 Madrid */

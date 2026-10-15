@@ -4,6 +4,7 @@ import { shipments, stores } from '@/db/schema';
 import { adminApiUrl } from './api';
 import { storeEnv } from './verify';
 import { isCorreos, ingestShopifyOrder, fulfilledAt, type ShopifyOrderPayload } from './ingest';
+import { verdictFor } from './channel';
 import { cutoffFor } from '@/lib/cleanup';
 import { retentionDays } from '@/lib/retention';
 import { now } from '@/lib/clock';
@@ -200,6 +201,28 @@ export async function pullStore(
     for (const order of page.orders) {
       report.checked += 1;
 
+      /*
+       * THE CHANNEL QUESTION FIRST, before the fulfilment filters answer it by
+       * accident.
+       *
+       * A TikTok Shop order's fulfilment carries a PKA6TP… code with no
+       * carrier name, which `isCorreos` deliberately does not recognise — see
+       * the test in tests/shopify-pull.test.ts. So asking about the fulfilment
+       * first put most TikTok orders in `notCorreos`, and the line the
+       * operator reads ("41 TikTok orders skipped, they come from the TikTok
+       * upload") understated by however many of the 235 came in that shape.
+       * Same for one posted before the retention window: `outsideWindow`.
+       *
+       * `ingestShopifyOrder` asks again and is the write-time guard. This is
+       * only about counting, and about not doing the work.
+       */
+      const channel = verdictFor(store.key, order);
+      if (!channel.accept) {
+        if (channel.reason === 'tiktok') report.tiktokOrders += 1;
+        else report.otherChannel += 1;
+        continue;
+      }
+
       const correos = (order.fulfillments ?? []).filter(isCorreos);
       if (!correos.length) { report.notCorreos += 1; continue; }
 
@@ -228,8 +251,12 @@ export async function pullStore(
       } else if (result.status === 'existing') {
         report.alreadyHad += Math.max(1, result.shipmentIds.length);
       } else if (result.status === 'other_channel') {
-        // `ingestShopifyOrder` wrote nothing. Which channel it was matters to
-        // the line the operator reads, so the two reasons are kept apart.
+        /*
+         * Not reachable while the check above runs first, and kept anyway: it
+         * is `ingestShopifyOrder` that decides what gets written, and if these
+         * two ever disagree the count should follow the one that wrote
+         * nothing rather than quietly land in `notCorreos`.
+         */
         if (result.channel?.accept === false && result.channel.reason === 'tiktok') {
           report.tiktokOrders += 1;
         } else {

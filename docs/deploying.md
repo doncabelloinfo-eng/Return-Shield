@@ -272,7 +272,18 @@ the TikTok upload".
 
 Shopify puts a bare app id in `source_name` for an app with no named channel
 (`2329312` and `3890849`, once each on this store). Those are left out by
-default; if one turns out to be a real channel, add the number to the list.
+default; if one turns out to be a real channel, add the number — **as part of
+the whole list**, because the variable REPLACES the defaults rather than adding
+to them:
+
+```
+SHOPIFY_DONCABELLO_ORDER_SOURCES=web,shopify_draft_order,2329312
+```
+
+Setting it to just `2329312` would refuse every Online Store and Draft Orders
+order, and a refused order writes nothing at all — so the only sign would be
+the pull's "skipped from other channels" count and an hourly backfill that
+reads 250 orders and creates none. If in doubt, leave the variable unset.
 
 **The orders already pulled in** are moved back by a button on Settings →
 Shopify, "TikTok orders pulled from Shopify": it previews, then re-points each

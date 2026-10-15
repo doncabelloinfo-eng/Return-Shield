@@ -45,6 +45,8 @@ export interface TaggedOrder {
   valueCents: number;
   currency: string;
   paymentMethod: 'prepaid' | 'cod';
+  /** Whether the Shopify row carries contact details the move will discard. */
+  hasContact: boolean;
 }
 
 export interface HandoverPreview {
@@ -56,6 +58,16 @@ export interface HandoverPreview {
   emptyRows: number;
   /** Tags we could not read an id out of. Left exactly as they are. */
   unreadableTags: number;
+  /**
+   * Parcels whose Shopify name, phone, email and address go with the old row.
+   *
+   * Said before the button rather than after, because the move cannot be
+   * undone and this is the one thing it throws away. TikTok's own files carry
+   * no contact details either — that is why the upload writes an empty name —
+   * so what is lost is whatever Shopify had. For a parcel still mid-ladder it
+   * means the escalation engine opens a "call them" task with no number.
+   */
+  parcelsLosingContact: number;
   /** Which Shopify shops they are in, for the line on screen. */
   byStore: { store: string; orders: number; parcels: number }[];
 }
@@ -76,6 +88,8 @@ interface RawTaggedOrder {
   total_value_cents: number | string;
   currency: string | null;
   payment_method: 'prepaid' | 'cod' | null;
+  phone_e164: string | null;
+  email: string | null;
 }
 
 /**
@@ -95,13 +109,21 @@ export async function taggedShopifyOrders(): Promise<TaggedOrder[]> {
            o.total_value_cents,
            o.currency,
            o.payment_method,
+           o.phone_e164,
+           o.email,
            (SELECT count(*)::int FROM shipments s WHERE s.order_id = o.id) AS parcels
       FROM orders o
       JOIN stores st ON st.id = o.store_id
      WHERE st.platform = 'shopify'
        AND EXISTS (
          SELECT 1 FROM jsonb_array_elements_text(o.tags) AS tag
-          WHERE tag LIKE ${`${TIKTOK_TAG_PREFIX}%`}
+          -- Lowercased on both sides, because the ingest guard matches the
+          -- prefix without regard to case (hasTikTokTag). A case-sensitive
+          -- LIKE here would refuse an order at the door and then fail to find
+          -- it again. And no backticks in this comment: one closes the
+          -- template literal around this SQL, which is the third time that
+          -- has cost an hour in this repo.
+          WHERE lower(tag) LIKE ${`${TIKTOK_TAG_PREFIX.toLowerCase()}%`}
        )
      ORDER BY o.order_number
   `);
@@ -118,6 +140,7 @@ export async function taggedShopifyOrders(): Promise<TaggedOrder[]> {
     valueCents: Number(r.total_value_cents),
     currency: r.currency ?? 'EUR',
     paymentMethod: r.payment_method ?? 'prepaid',
+    hasContact: Boolean(r.phone_e164 || r.email),
   }));
 }
 
@@ -130,10 +153,15 @@ function summarise(tagged: TaggedOrder[]): HandoverPreview {
     byStore.set(o.storeName, seen);
   }
 
+  const movable = tagged.filter((o) => o.tiktokOrderId);
+
   return {
     tiktokOrders: tagged.length,
-    parcelsToMove: tagged.filter((o) => o.tiktokOrderId).reduce((n, o) => n + o.parcels, 0),
-    emptyRows: tagged.filter((o) => o.tiktokOrderId && o.parcels === 0).length,
+    parcelsToMove: movable.reduce((n, o) => n + o.parcels, 0),
+    parcelsLosingContact: movable
+      .filter((o) => o.hasContact)
+      .reduce((n, o) => n + o.parcels, 0),
+    emptyRows: movable.filter((o) => o.parcels === 0).length,
     unreadableTags: tagged.filter((o) => !o.tiktokOrderId).length,
     byStore: [...byStore.entries()]
       .map(([store, n]) => ({ store, ...n }))
@@ -191,58 +219,78 @@ export async function applyTikTokHandover(): Promise<HandoverResult> {
      */
     // eslint-disable-next-line no-await-in-loop
     await getDb().transaction(async (tx) => {
-      const [target] = await tx.insert(orders).values({
-        storeId: tiktokStore.id,
-        externalOrderId: tiktokOrderId,
-        // Both the TikTok id, which is what the upload writes.
-        orderNumber: tiktokOrderId,
-        // The empty string, not "Unknown customer": these orders have no name
-        // in TikTok's own files either, and a placeholder leaks into the
-        // Spanish message as "Hola Unknown". See lib/orders/customer-label.ts.
-        customerName: '',
-        phoneE164: null,
-        phoneRaw: null,
-        phoneStatus: 'missing',
-        email: null,
-        addressLine: null,
-        city: null,
-        postalCode: null,
-        /*
-         * The money comes across, because it is the same money. Everything
-         * else is left as the upload would have it, but `value` and
-         * `payment_method` are what the escalation engine ranks by — a parcel
-         * written down as €0 would quietly sink to the bottom of the list it
-         * was moved onto.
-         */
-        totalValueCents: o.valueCents,
-        currency: o.currency,
-        paymentMethod: o.paymentMethod,
-        // Null, not the ship date: TikTok's files carry no order date, and the
-        // screens show "—" rather than claiming it was ordered the day it was
-        // posted.
-        placedAt: null,
-        createdAt: at,
-      }).onConflictDoUpdate({
-        target: [orders.storeId, orders.externalOrderId],
-        /*
-         * A no-op write of the id it already has. The row may exist because
-         * the upload created it, and in that case the upload owns its
-         * contents — but `DO NOTHING` returns no row, and this needs the id.
-         */
-        set: { externalOrderId: tiktokOrderId },
-      }).returning({ id: orders.id, fresh: raw<boolean>`(xmax = 0)` });
+      /*
+       * ITS PARCELS, READ HERE, ON `tx`.
+       *
+       * Not taken from the preview's snapshot, and not assumed: this decides
+       * whether there is anything to move at all, and getting it wrong is what
+       * the first version did. It upserted the TikTok order for every tagged
+       * row, so an EMPTY Shopify row — one the upload got to first — created a
+       * brand-new TikTok order with no parcel in it, counted it in
+       * `tiktokOrdersCreated`, and left it behind for ever. Seen on the built
+       * server: `#22689` was removed, as it should be, and `tiktok-es` order
+       * 576967097623484649 was left holding nothing.
+       *
+       * Reading it inside the transaction also settles the race: a parcel that
+       * arrived since the snapshot is moved rather than left behind.
+       */
+      const parcels = await tx.select({ id: shipments.id }).from(shipments)
+        .where(eq(shipments.orderId, o.orderId));
 
-      if (target.fresh) tiktokOrdersCreated += 1;
+      if (parcels.length) {
+        const [target] = await tx.insert(orders).values({
+          storeId: tiktokStore.id,
+          externalOrderId: tiktokOrderId,
+          // Both the TikTok id, which is what the upload writes.
+          orderNumber: tiktokOrderId,
+          // The empty string, not "Unknown customer": these orders have no name
+          // in TikTok's own files either, and a placeholder leaks into the
+          // Spanish message as "Hola Unknown". See lib/orders/customer-label.ts.
+          customerName: '',
+          phoneE164: null,
+          phoneRaw: null,
+          phoneStatus: 'missing',
+          email: null,
+          addressLine: null,
+          city: null,
+          postalCode: null,
+          /*
+           * The money comes across, because it is the same money. Everything
+           * else is left as the upload would have it, but `value` and
+           * `payment_method` are what the escalation engine ranks by — a parcel
+           * written down as €0 would quietly sink to the bottom of the list it
+           * was moved onto.
+           */
+          totalValueCents: o.valueCents,
+          currency: o.currency,
+          paymentMethod: o.paymentMethod,
+          // Null, not the ship date: TikTok's files carry no order date, and the
+          // screens show "—" rather than claiming it was ordered the day it was
+          // posted.
+          placedAt: null,
+          createdAt: at,
+        }).onConflictDoUpdate({
+          target: [orders.storeId, orders.externalOrderId],
+          /*
+           * A no-op write of the id it already has. The row may exist because
+           * the upload created it, and in that case the upload owns its
+           * contents — but `DO NOTHING` returns no row, and this needs the id.
+           */
+          set: { externalOrderId: tiktokOrderId },
+        }).returning({ id: orders.id, fresh: raw<boolean>`(xmax = 0)` });
 
-      // The ROW moves. Its id, state, events, contact log, tasks and closures
-      // are all untouched, which is the whole point of not recreating it.
-      const movedRows = await tx.update(shipments)
-        .set({ orderId: target.id })
-        .where(eq(shipments.orderId, o.orderId))
-        .returning({ id: shipments.id });
+        if (target.fresh) tiktokOrdersCreated += 1;
 
-      moved += movedRows.length;
-      if (!firstShipmentId && movedRows[0]) firstShipmentId = movedRows[0].id;
+        // The ROW moves. Its id, state, events, contact log, tasks and closures
+        // are all untouched, which is the whole point of not recreating it.
+        const movedRows = await tx.update(shipments)
+          .set({ orderId: target.id })
+          .where(eq(shipments.orderId, o.orderId))
+          .returning({ id: shipments.id });
+
+        moved += movedRows.length;
+        if (!firstShipmentId && movedRows[0]) firstShipmentId = movedRows[0].id;
+      }
 
       /*
        * And the Shopify row goes — but only once nothing points at it.
@@ -262,11 +310,25 @@ export async function applyTikTokHandover(): Promise<HandoverResult> {
     });
   }
 
-  if (moved > 0 || ordersRemoved > 0) {
-    const from = preview.byStore.length === 1 ? preview.byStore[0].store : 'Shopify';
+  /*
+   * The line says what happened, which is not always "moved".
+   *
+   * The second half of this job is the empty rows: once the parcels have gone,
+   * a re-press finds tagged Shopify orders with nothing on them and removes
+   * them. Building the sentence from `moved` alone wrote "Moved 0 TikTok
+   * parcels" as the one permanent record of a run that deleted fifteen rows.
+   */
+  const from = preview.byStore.length === 1 ? preview.byStore[0].store : 'Shopify';
+
+  if (moved > 0) {
     await say(
       `Moved ${moved} TikTok ${moved === 1 ? 'parcel' : 'parcels'} from ${from} to ${spec.name}`,
       firstShipmentId ?? undefined,
+    );
+  } else if (ordersRemoved > 0) {
+    await say(
+      `Removed ${ordersRemoved} empty Shopify order ${ordersRemoved === 1 ? 'row' : 'rows'} `
+      + `from ${from} — those TikTok parcels are already under ${spec.name}`,
     );
   }
 

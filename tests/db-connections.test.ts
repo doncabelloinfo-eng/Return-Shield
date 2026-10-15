@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import { readFileSync, readdirSync } from 'node:fs';
+import { join, relative } from 'node:path';
 import {
   RETRY_BUDGET_MS, RETRY_DELAYS_MS, armIdleRelease, getSql, idleReleaseArmed,
   isConnectionRefusal, retryableRead, withDbRetry,
@@ -258,6 +260,17 @@ describe('a read that was refused a connection', () => {
 describe('the window that lets the pool let go', () => {
   const SYMBOL = Symbol.for('@vercel/request-context');
 
+  /** One request's context. Vercel gives each invocation its own object. */
+  function invocation(): { ctx: { waitUntil: (p: Promise<unknown>) => void }; held: Promise<unknown>[] } {
+    const held: Promise<unknown>[] = [];
+    const ctx = { waitUntil: (p: Promise<unknown>) => { held.push(p); } };
+    return { ctx, held };
+  }
+
+  function serving(ctx: unknown): void {
+    (globalThis as Record<symbol, unknown>)[SYMBOL] = { get: () => ctx };
+  }
+
   afterEach(() => {
     delete (globalThis as Record<symbol, unknown>)[SYMBOL];
     delete process.env.DB_IDLE_TIMEOUT;
@@ -271,10 +284,8 @@ describe('the window that lets the pool let go', () => {
 
   it('asks one invocation to hold it open once, however many queries it runs', async () => {
     process.env.DB_IDLE_TIMEOUT = '1';
-    const held: Promise<unknown>[] = [];
-    // ONE context object, the way a real invocation's context is one object.
-    const ctx = { waitUntil: (p: Promise<unknown>) => { held.push(p); } };
-    (globalThis as Record<symbol, unknown>)[SYMBOL] = { get: () => ctx };
+    const { ctx, held } = invocation();
+    serving(ctx);
 
     armIdleRelease();
     armIdleRelease();
@@ -283,57 +294,92 @@ describe('the window that lets the pool let go', () => {
     expect(held).toHaveLength(1);
     expect(idleReleaseArmed()).toBe(true);
 
-    // It is a wait, not a close: nothing here ends the pool, because the pool
-    // is shared by every request on the instance. That is the lesson of
-    // tests/pool-lifetime.test.ts.
     await held[0];
     expect(idleReleaseArmed()).toBe(false);
   }, 10_000);
 
-  it('asks EVERY invocation that uses the pool, not just the first', async () => {
+  it('gives every invocation its OWN hold, not a share of one window', async () => {
     /*
-     * The first version registered `waitUntil` once and took the early return
-     * for everybody after it. So the hold lasted only as long as the FIRST
-     * request's invocation; when that was torn down nothing kept the instance
-     * awake, and `releasing` being non-null meant no later request could arm
-     * one either — the mechanism disarmed itself on a busy instance.
+     * This is the ten-second timeout, and it is why the hold is per
+     * invocation. The version before this handed every request the SAME
+     * promise, so one minute after it went live the Vercel logs had
+     *
+     *   Vercel Runtime Timeout Error: Task timed out after 10 seconds
+     *
+     * on /api/sweep-progress: `maxDuration = 10`, one query, answered in
+     * milliseconds, then killed because a shared window kept its invocation
+     * alive past its own limit while other requests used the database.
      */
     process.env.DB_IDLE_TIMEOUT = '1';
-    const held: Promise<unknown>[] = [];
-    let ctx = { waitUntil: (p: Promise<unknown>) => { held.push(p); } };
-    (globalThis as Record<symbol, unknown>)[SYMBOL] = { get: () => ctx };
+    const first = invocation();
+    const second = invocation();
 
-    armIdleRelease();                    // invocation one
-    ctx = { waitUntil: (p: Promise<unknown>) => { held.push(p); } };
-    armIdleRelease();                    // invocation two, inside the same window
+    serving(first.ctx);
+    armIdleRelease();
+    serving(second.ctx);
+    armIdleRelease();
 
-    expect(held).toHaveLength(2);
-    // The same window, handed to both: one timer for the instance.
-    expect(held[0]).toBe(held[1]);
+    expect(first.held).toHaveLength(1);
+    expect(second.held).toHaveLength(1);
+    expect(first.held[0]).not.toBe(second.held[0]);
 
-    await held[0];
-    expect(idleReleaseArmed()).toBe(false);
+    await Promise.all([first.held[0], second.held[0]]);
   }, 10_000);
+
+  it('does not hold one invocation open while OTHERS keep the pool busy', async () => {
+    /*
+     * The same bug from the other side. A poll lands on a busy instance, runs
+     * its one query and answers — and must then be released on its own
+     * schedule, however long the instance stays busy. The requests doing that
+     * work hold the instance awake themselves; this one has nothing left to
+     * wait for.
+     *
+     * One second of `DB_IDLE_TIMEOUT`, so the hold is two seconds, against
+     * four seconds of other traffic.
+     */
+    process.env.DB_IDLE_TIMEOUT = '1';
+    const poll = invocation();
+    const busy = invocation();
+
+    serving(poll.ctx);
+    armIdleRelease();
+    const started = Date.now();
+
+    let pollSettled = 0;
+    void poll.held[0].then(() => { pollSettled = Date.now() - started; });
+
+    // Four seconds of somebody else's queries, every 400ms.
+    for (let i = 0; i < 10; i += 1) {
+      serving(busy.ctx);
+      armIdleRelease();
+      // eslint-disable-next-line no-await-in-loop
+      await sleep(400);
+    }
+
+    // Two seconds after ITS last query, not six seconds after the traffic
+    // stopped. A /api/sweep-progress with maxDuration 10 survives this.
+    expect(pollSettled, `the poll was held for ${pollSettled}ms`).toBeGreaterThan(1_800);
+    expect(pollSettled, `the poll was held for ${pollSettled}ms`).toBeLessThan(3_500);
+
+    serving(busy.ctx);
+    await busy.held[0];
+  }, 20_000);
 
   it('stays open until idle_timeout after the LAST query, not the first', async () => {
     /*
-     * The leak this was supposed to stop, left in place by the first version.
-     *
-     * It armed ONE six-second timer at a request's first `getDb()` and ignored
-     * every call after it, so any request whose last query came more than a
-     * second after its first — a page render (Vercel's P75 time to first byte
-     * here is three seconds), a cron run, a sweep, an export — left its
-     * connection idle after the window had already closed, and the instance
-     * could be suspended still holding it.
+     * The leak this exists to stop. A single timer armed at a request's first
+     * `getDb()` closed while the request was still working — a page render
+     * (Vercel's P75 time to first byte here is three seconds), a cron run, a
+     * sweep, an export — so the connection was left idle after the window had
+     * already gone, and the instance could be suspended still holding it.
      *
      * Written with a one-second `DB_IDLE_TIMEOUT` so the test takes seconds
      * rather than tens of them. At the production five it is the same shape:
-     * a query four seconds in holds the window to ten seconds.
+     * a query four seconds in holds that invocation to ten seconds.
      */
     process.env.DB_IDLE_TIMEOUT = '1';
-    const held: Promise<unknown>[] = [];
-    const ctx = { waitUntil: (p: Promise<unknown>) => { held.push(p); } };
-    (globalThis as Record<symbol, unknown>)[SYMBOL] = { get: () => ctx };
+    const { ctx, held } = invocation();
+    serving(ctx);
 
     let settled = false;
     armIdleRelease();
@@ -343,12 +389,11 @@ describe('the window that lets the pool let go', () => {
     armIdleRelease();
     expect(settled).toBe(false);
 
-    // Past the point where the FIRST query's window would have closed. The old
-    // version resolved here and let the instance sleep on the connection.
+    // Past the point where the FIRST query's window would have closed.
     await sleep(1_000);
     expect(settled).toBe(false);
     expect(idleReleaseArmed()).toBe(true);
-    // Extended, not duplicated: still one window for the instance.
+    // Extended, not duplicated: still one hold for this invocation.
     expect(held).toHaveLength(1);
 
     await sleep(1_600);
@@ -356,10 +401,33 @@ describe('the window that lets the pool let go', () => {
     expect(idleReleaseArmed()).toBe(false);
   }, 20_000);
 
+  it('opens a fresh hold for a query that comes after the last one expired', async () => {
+    // A long cron: it queries, goes quiet past its hold, then queries again.
+    // Bumping a settled hold would hold nothing, so a new one is armed.
+    process.env.DB_IDLE_TIMEOUT = '1';
+    const { ctx, held } = invocation();
+    serving(ctx);
+
+    armIdleRelease();
+    await held[0];
+    expect(idleReleaseArmed()).toBe(false);
+
+    armIdleRelease();
+    expect(held).toHaveLength(2);
+    expect(idleReleaseArmed()).toBe(true);
+    await held[1];
+  }, 20_000);
+
   it('survives a runtime whose waitUntil throws', () => {
-    (globalThis as Record<symbol, unknown>)[SYMBOL] = {
-      get: () => ({ waitUntil: () => { throw new Error('not supported here'); } }),
-    };
+    /*
+     * And reports honestly that nothing is holding this invocation open,
+     * because nothing is. The production path is `waitUntil` working — it has
+     * been watched working in a browser — and this is only about not throwing
+     * on a runtime that does not have it.
+     */
+    const ctx = { waitUntil: () => { throw new Error('not supported here'); } };
+    serving(ctx);
+
     expect(() => armIdleRelease()).not.toThrow();
     expect(idleReleaseArmed()).toBe(false);
   });
@@ -503,4 +571,66 @@ describe('five reads in a row against a database that is not there', () => {
     expect(took[4], `the fifth must not be slower than the first (${all}ms)`)
       .toBeLessThan(took[0] + 2_000);
   }, 120_000);
+});
+
+/* ================================= and the routes that have to live that long */
+
+describe('every route that touches the database', () => {
+  /**
+   * HAS TO OUTLIVE ITS OWN HOLD.
+   *
+   * The ten-second timeout came from a hold outlasting the function it was
+   * attached to. The hold is now `DB_IDLE_TIMEOUT + 1s` — six seconds by
+   * default — measured from that invocation's last query, so every route needs
+   * a `maxDuration` above its own work plus six.
+   *
+   * The work is the part a test cannot measure, so this checks the part it
+   * can: that no route declares a limit so short that the hold alone would
+   * breach it. `/api/sweep-progress` at 10 is the tightest in the app, and it
+   * is the one that was being killed.
+   *
+   * The other half of the rule is the environment: raising DB_IDLE_TIMEOUT
+   * above about eight seconds would put the hold over that same route's limit.
+   * That is in .env.example next to the variable, because nothing here can see
+   * what production sets it to.
+   */
+  const HOLD_SECONDS = 5 + 1;
+
+  function routes(dir: string, out: string[] = []): string[] {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name.startsWith('.')) continue;
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) routes(full, out);
+      else if (entry.name === 'route.ts') out.push(relative(process.cwd(), full));
+    }
+    return out;
+  }
+
+  const ROUTES = routes('app/api');
+
+  it('is actually being looked at', () => {
+    expect(ROUTES).toContain('app/api/sweep-progress/route.ts');
+    expect(ROUTES).toContain('app/api/cron/reconcile/route.ts');
+    expect(ROUTES.length).toBeGreaterThanOrEqual(13);
+  });
+
+  it('declares a maxDuration with room for the hold', () => {
+    const tight: string[] = [];
+
+    for (const file of ROUTES) {
+      const m = /export const maxDuration = (\d+);/.exec(readFileSync(file, 'utf8'));
+      // A route with no maxDuration takes the platform default, which is above
+      // this; only an explicit number can be too small.
+      if (!m) continue;
+      const seconds = Number(m[1]);
+      if (seconds < HOLD_SECONDS + 2) tight.push(`${file} — ${seconds}s`);
+    }
+
+    expect(
+      tight,
+      `the release window holds an invocation ${HOLD_SECONDS}s past its last query, `
+      + 'so a route with less than that plus its own work is killed by the platform '
+      + 'after answering — an error in the logs the operator never sees',
+    ).toEqual([]);
+  });
 });

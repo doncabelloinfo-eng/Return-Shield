@@ -236,12 +236,10 @@ export async function closeDb(): Promise<void> {
  * well-known symbol, and its `waitUntil`, which keeps the instance alive until
  * a promise settles.
  *
- * It arms a single timer slightly longer than `idle_timeout` and lets
- * postgres.js close its own idle connections on its own schedule. IT CLOSES
- * NOTHING ITSELF, and that is the whole design: the pool is a module-level
- * singleton shared by every request on the instance, and the one thing that
- * must never happen again is a request taking it away from another. That bug
- * is what `closeDb()` in a request path did; see tests/pool-lifetime.test.ts.
+ * Each invocation is held a little longer than `idle_timeout` past its own
+ * last query, and postgres.js closes its own idle connections on its own
+ * schedule. IT CLOSES NOTHING ITSELF — see `holdUntilIdle` for why that is the
+ * whole design, and why the hold is per invocation rather than shared.
  *
  * Off Vercel there is no request context, nothing is armed, and the ordinary
  * timer runs because nothing suspends the process.
@@ -265,87 +263,96 @@ function idleTimeoutMs(): number {
   return envNumber('DB_IDLE_TIMEOUT', 5) * 1000;
 }
 
-/** One pending window per instance, however many requests arrive inside it. */
-let releasing: Promise<void> | null = null;
-/** When the pool was last used. The window is measured from THIS. */
-let lastUsedAt = 0;
-/** The invocations already holding this window open, so each is asked once. */
-const holding = new WeakSet<object>();
-
 /**
- * The longest one window may be extended before it settles anyway.
+ * ONE HOLD PER INVOCATION, measured from that invocation's own last query.
  *
- * Without it, an instance busy enough to run a query every few seconds — an
- * operator clicking between screens, which is the normal use of this app —
- * pushes `lastUsedAt` forward for ever and the promise never resolves. That
- * matters because `releasing` is also what stops a second window being
- * opened: a promise that never settles would leave the mechanism permanently
- * disarmed on that instance, which is worse than not having it. When this cap
- * closes a window, the next query simply opens a fresh one.
+ * The version before this handed every invocation the SAME promise, so a
+ * request joined a window that other requests kept extending. One minute after
+ * it went live the Vercel logs had this:
+ *
+ *   Vercel Runtime Timeout Error: Task timed out after 10 seconds
+ *
+ * on /api/sweep-progress — `maxDuration = 10`, one query, answered in
+ * milliseconds, and then killed because a shared window kept its invocation
+ * alive past its own limit while other requests used the database. The
+ * operator never saw it: the JSON had already been sent. It was simply an
+ * error in the logs on every busy minute, and `import-reminder` and
+ * `push-heartbeat` could meet the same wall.
+ *
+ * So no invocation waits on anybody else's work. Each one is held until
+ * `idle_timeout` plus a second after ITS last query, and the requests that
+ * keep the pool busy keep the instance awake themselves — which is the same
+ * outcome for the pool and a bounded one for every function.
+ *
+ * The map is weak and keyed on the request context, so an invocation's hold
+ * goes with it. A hold that has already settled is replaced rather than
+ * extended: a long cron that queries again after its first hold expired needs
+ * a new one, and bumping a settled hold's timestamp would hold nothing.
  */
-const MAX_HOLD_MS = 30_000;
+interface Hold {
+  lastUsedAt: number;
+  settled: boolean;
+}
+
+const holds = new WeakMap<object, Hold>();
 
 export function armIdleRelease(): void {
-  lastUsedAt = Date.now();
-
   const ctx = requestContext();
   if (!ctx?.waitUntil) return;
 
-  if (!releasing) {
-    releasing = holdUntilIdle().finally(() => { releasing = null; });
+  const open = holds.get(ctx);
+  if (open && !open.settled) {
+    // Same invocation, another query: the hold moves with it.
+    open.lastUsedAt = Date.now();
+    return;
   }
 
-  /*
-   * EVERY invocation that touches the pool holds the instance open, not only
-   * the one that happened to open the window.
-   *
-   * The first version registered `waitUntil` once and returned early for
-   * everybody after it, so the hold lasted only as long as the FIRST
-   * request's invocation. Once that was torn down nothing kept the instance
-   * awake, and `releasing` being non-null meant no later request could arm
-   * one either.
-   */
-  if (holding.has(ctx)) return;
-  holding.add(ctx);
+  const hold: Hold = { lastUsedAt: Date.now(), settled: false };
+  holds.set(ctx, hold);
 
   try {
-    ctx.waitUntil(releasing);
+    ctx.waitUntil(holdUntilIdle(hold));
   } catch {
-    // An older runtime without waitUntil. The pool behaves as it did before;
-    // the window still settles and clears itself.
+    // An older runtime without waitUntil. The pool behaves as it did before.
+    hold.settled = true;
   }
 }
 
 /**
- * Resolve once `idle_timeout` has passed since the LAST query, not the first.
+ * Resolve once `idle_timeout` has passed since this invocation's last query.
  *
- * The first version of this armed a single six-second timer at a request's
- * first `getDb()` and ignored every call after it, which meant any request
- * whose last query came more than a second after its first — a page render
- * (Vercel's P75 time to first byte here is three seconds), a cron run, a
- * sweep, an export — left its connection idle AFTER the window had closed.
- * The instance could then be suspended still holding it, which is the whole
- * thing this exists to prevent.
+ * It is a wait, not a close. Nothing here ends the pool — the pool is a
+ * module-level singleton shared by every request on the instance, and the one
+ * thing that must never happen again is a request taking it away from another.
+ * That bug is what `closeDb()` in a request path did; see
+ * tests/pool-lifetime.test.ts. All this does is keep the instance awake long
+ * enough for postgres.js' own `idle_timeout` to fire, which it cannot do while
+ * Fluid compute has the instance suspended.
  *
- * So the wait is re-checked against `lastUsedAt` each time it elapses. Still
- * one window per instance: a later query extends it rather than opening a
- * second one. A second of slack on top of `idle_timeout`, so postgres.js' own
- * timer has actually fired and the socket has gone before the instance is
- * allowed to sleep.
+ * The loop re-reads `lastUsedAt` each time it elapses, because the stamp moves
+ * when the invocation runs another query — and the one that matters is the
+ * LAST one. A fixed timer armed at the first query would close while a page
+ * was still loading, which is the leak this exists to prevent. It always
+ * settles: nothing but this invocation moves its own stamp, so once the
+ * invocation stops querying the wait runs out.
  */
-async function holdUntilIdle(): Promise<void> {
-  const openedAt = Date.now();
+async function holdUntilIdle(hold: Hold): Promise<void> {
   for (;;) {
-    const due = Math.min(lastUsedAt + idleTimeoutMs() + 1_000, openedAt + MAX_HOLD_MS);
-    const left = due - Date.now();
-    if (left <= 0) return;
+    const left = (hold.lastUsedAt + idleTimeoutMs() + 1_000) - Date.now();
+    if (left <= 0) {
+      hold.settled = true;
+      return;
+    }
     await new Promise<void>((resolve) => { setTimeout(resolve, left); });
   }
 }
 
-/** Test seam: whether a release window is currently armed. */
+/** Test seam: whether this invocation is still being held open. */
 export function idleReleaseArmed(): boolean {
-  return releasing !== null;
+  const ctx = requestContext();
+  if (!ctx) return false;
+  const hold = holds.get(ctx);
+  return Boolean(hold && !hold.settled);
 }
 
 /* ------------------------------------------------- a refused connection */
@@ -467,7 +474,7 @@ async function attemptWithRetries<T>(label: string, run: () => Promise<T>): Prom
        * pool's timer had even started. One stamp here covers every read that
        * goes through a retry wrapper, which is nearly all of them.
        */
-      lastUsedAt = Date.now();
+      armIdleRelease();
     }
   }
 }

@@ -316,6 +316,32 @@ describe('the thirty-day pull', () => {
     expect((await counts()).shipments).toBe(2);
   });
 
+  it('counts a TikTok order as TikTok even in its REAL fulfilment shape', async () => {
+    /*
+     * The shape that mattered and nearly got missed. A TikTok Shop fulfilment
+     * carries a PKA6TP… code with no carrier name, which `isCorreos`
+     * deliberately does not recognise — so when the pull asked about the
+     * fulfilment before it asked about the channel, most of the 235 landed in
+     * `notCorreos` and the line the operator reads understated the skip by
+     * most of its number.
+     */
+    const report = await pullStore(STORE, {
+      fetchImpl: shopify([{
+        ...tiktokOrder(17),
+        fulfillments: [{
+          id: 9917,
+          tracking_company: '',
+          tracking_number: 'PKA6TP9800094740148903F',
+          created_at: '2026-10-14T11:00:00Z',
+        }],
+      }]),
+    });
+
+    expect(report.tiktokOrders).toBe(1);
+    expect(report.notCorreos).toBe(0);
+    expect(report.added).toBe(0);
+  });
+
   it('counts a TikTok order as TikTok, not as "not Correos"', async () => {
     // It has a perfectly good Correos fulfilment. Lumping it in with the
     // genuinely uninteresting orders would hide 235 of 250 behind a label

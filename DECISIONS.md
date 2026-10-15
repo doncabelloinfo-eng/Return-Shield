@@ -1279,6 +1279,93 @@ Everything else is as the TikTok upload writes it: the TikTok id as both order
 number and external id, an empty name, no phone, email or address, and no
 order date.
 
+## 6l. The ten-second timeout, and the empty order the handover left behind
+
+### A hold must not outlive the function it is attached to
+
+One minute after the per-invocation release window went live, the Vercel logs
+had this on `/api/sweep-progress`:
+
+```
+Vercel Runtime Timeout Error: Task timed out after 10 seconds
+```
+
+That route declares `maxDuration = 10`, runs one query and answers in
+milliseconds. It was being killed because every invocation that touched the
+pool was handed the SAME promise, and that promise kept extending while other
+requests on the instance used the database — up to the thirty-second cap. So a
+poll that landed on a busy instance was held past its own limit and shot. The
+operator never saw it: the JSON had already been sent. It was simply an error
+in the logs and in Observability on every busy minute, and `import-reminder`
+and `push-heartbeat` at thirty seconds could meet the same wall.
+
+Each invocation now has its own hold, kept in a `WeakMap` on the request
+context and measured from ITS last query. The requests that keep the pool busy
+keep the instance awake themselves, which is the same outcome for the pool and
+a bounded one for every function. Measured on the compiled module: a poll
+alongside four seconds of other traffic is released after 2,001ms with
+`DB_IDLE_TIMEOUT=1`, where before it waited for the traffic to stop.
+
+The cap is gone with it — a hold that only its own invocation can extend
+cannot run away — and `tests/db-connections.test.ts` now checks every route's
+declared `maxDuration` against the hold, because the rule only holds while
+that stays true. The other half of it is the environment: raising
+`DB_IDLE_TIMEOUT` above about eight seconds would put the hold over that same
+route's limit, and nothing in the repo can see what production sets. That is
+written next to the variable in `.env.example`.
+
+### The handover created an order with nothing in it
+
+`applyTikTokHandover` upserted the TikTok Shop ES order for every tagged
+Shopify row it could read an id from — including the rows with no parcel, the
+ones the upload got to first. When that TikTok order did not already exist, the
+result was a brand-new order holding nothing, counted as created and left
+behind for ever. On the built server: `#22689` was removed, as it should be,
+and `tiktok-es` order 576967097623484649 was left empty.
+
+The author's own test caught it and the code was wrong. The transaction now
+reads that order's parcels first, on `tx` — not from the preview's snapshot,
+which also settles the race where a parcel arrives in between — and upserts
+the TikTok order only when there is at least one to move. The guarded delete
+runs either way, which is what clears the empty rows.
+
+Two smaller things from the same review:
+
+- The ticker line was built from `moved` alone, so a run that only removed
+  empty rows — the normal second half of this job — wrote "Moved 0 TikTok
+  parcels" as its one permanent record. It now says what it did.
+- `taggedShopifyOrders` matched the tag with a case-sensitive `LIKE` while the
+  ingest guard matches the prefix without regard to case. A tag in another case
+  would have been refused at the door and then never found again. Both are
+  lowercased now. And the SQL comment explaining it must contain no backticks:
+  one closes the template literal around the query, which is the third time
+  that has cost an hour in this repo.
+
+### And two things the pull was not saying
+
+The channel question was asked after the Correos and retention filters, so a
+TikTok order in its real shape — a `PKA6TP…` code with no carrier name, which
+`isCorreos` deliberately does not recognise — was counted as "not Correos".
+The line the operator reads ("41 TikTok orders skipped, they come from the
+TikTok upload") understated the skip by most of its number. The question is
+asked first now; `ingestShopifyOrder` still asks again, and is still the only
+write-time guard.
+
+The hourly backfill dropped the counts entirely. Since a refused order writes
+no row, no shipment and no ticker line, an operator who set
+`SHOPIFY_<KEY>_ORDER_SOURCES` wrongly would have seen an hourly job read 250
+orders, report success and create nothing, for ever. Its detail now carries
+`tiktokSkipped` and `otherChannelSkipped`, and `otherChannelSkipped` above zero
+is the one to look at: TikTok is expected, a channel nobody allowed is not.
+
+Finally, the preview now says how many parcels will lose the Shopify name,
+phone and address, because the move cannot be undone and that is the one thing
+it throws away. The data still goes — the brief asked for the TikTok upload's
+shape, and TikTok's own files carry no contact details either — but the
+operator reads the number before pressing rather than discovering it on a
+parcel mid-ladder, where the escalation engine will open a "call them" task
+with no number to ring.
+
 ## 7. Where I departed from the prototype
 
 The prototype is the specification, and I ported it. These are the places I did

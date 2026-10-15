@@ -63,12 +63,17 @@ export async function pullShopifyHistory(storeKey: string): Promise<PullResult> 
 /* ------------------------------------- the TikTok orders already pulled in */
 
 /*
- * Re-exported so the component imports one module rather than two. Type-only,
- * which a `'use server'` file is allowed to export — see
- * tests/use-server-exports.test.ts, which is the guard for the day a value
- * export here crashed every screen.
+ * The two result types are NOT re-exported from here.
+ *
+ * `export type { … }` from a 'use server' file builds — it is in c047b19 and
+ * `next build` passed — and every other type export in every actions file in
+ * this project is an `export interface`, which Next's server-actions transform
+ * demonstrably ignores. One outlier in the one file shape that has already
+ * crashed every screen once (tests/use-server-exports.test.ts) is not worth
+ * the coin-toss on a future Next release, and the component can import a type
+ * from the lib module for nothing: a type-only import is erased, so no server
+ * code reaches the client bundle.
  */
-export type { HandoverPreview, HandoverResult };
 
 export interface HandoverPreviewResult {
   ok: boolean;

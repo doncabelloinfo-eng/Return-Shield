@@ -145,6 +145,9 @@ describe('the preview', () => {
     expect(preview.parcelsToMove).toBe(2);
     expect(preview.emptyRows).toBe(1);
     expect(preview.unreadableTags).toBe(0);
+    // Both parcels carry a Shopify phone and email, and the move discards
+    // them: said before the button, because it cannot be undone.
+    expect(preview.parcelsLosingContact).toBe(2);
     expect(preview.byStore).toEqual([{ store: 'Don Cabello Profesional', orders: 3, parcels: 2 }]);
   });
 
@@ -268,6 +271,80 @@ describe('the apply', () => {
     // Only the TikTok order the parcel moved to.
     expect(left).toHaveLength(1);
     expect(left[0].number).toBe(TIKTOK_ID);
+  });
+
+  it('creates NO TikTok order for a tagged row that has no parcel', async () => {
+    /*
+     * The bug this test exists for. The first version upserted the TikTok
+     * order for every tagged row, so an empty Shopify row — one the upload got
+     * to first — created a brand-new TikTok order with nothing in it, counted
+     * it as created, and left it behind. Seen on the built server: `#22689`
+     * went, and `tiktok-es` order 576967097623484649 was left holding nothing.
+     */
+    await shopifyOrder({ number: '#22689', tiktokId: '576967097623484649' });
+    await shopifyOrder({ number: '#22690', tiktokId: '576967097623484650' });
+
+    const result = await applyTikTokHandover();
+
+    expect(result.moved).toBe(0);
+    expect(result.ordersRemoved).toBe(2);
+    expect(result.tiktokOrdersCreated).toBe(0);
+
+    // Nothing left anywhere: not the Shopify rows, and no empty TikTok ones.
+    expect(await getDb().select({ id: orders.id }).from(orders)).toHaveLength(0);
+  });
+
+  it('still removes an empty row whose TikTok order DOES exist', async () => {
+    // The ordinary case for the second half of the job: the parcel is already
+    // under TikTok Shop ES, and only the Shopify leftover needs removing.
+    const tiktokStoreId = await tiktokStore();
+    const [kept] = await getDb().insert(orders).values({
+      storeId: tiktokStoreId,
+      externalOrderId: TIKTOK_ID,
+      orderNumber: TIKTOK_ID,
+      customerName: '',
+      phoneStatus: 'missing',
+      totalValueCents: 4190,
+      paymentMethod: 'prepaid',
+      placedAt: null,
+      createdAt: clock.now(),
+    }).returning({ id: orders.id });
+
+    await getDb().insert(shipments).values({
+      orderId: kept.id,
+      carrier: 'correos',
+      shippingCode: 'PKA6TP9800094740148903F',
+      productCode: 'PAQ ESTÁNDAR',
+      state: 'at_office',
+      createdAt: clock.now(),
+    });
+
+    await shopifyOrder({ number: '#22687', tiktokId: TIKTOK_ID });
+
+    const result = await applyTikTokHandover();
+
+    expect(result.moved).toBe(0);
+    expect(result.ordersRemoved).toBe(1);
+    expect(result.tiktokOrdersCreated).toBe(0);
+
+    // The TikTok order and its parcel are exactly as they were.
+    expect(await getDb().select({ id: orders.id }).from(orders)).toHaveLength(1);
+    expect(await getDb().select({ id: shipments.id }).from(shipments)).toHaveLength(1);
+  });
+
+  it('says what it did when all it did was remove empty rows', async () => {
+    // "Moved 0 TikTok parcels" was the one permanent record of a run that
+    // deleted fifteen rows.
+    await shopifyOrder({ number: '#22689', tiktokId: '576967097623484649' });
+
+    await applyTikTokHandover();
+
+    const lines = await getDb().select({ text: activity.text }).from(activity);
+    expect(lines).toHaveLength(1);
+    expect(lines[0].text).toBe(
+      'Removed 1 empty Shopify order row from Don Cabello Profesional '
+      + '— those TikTok parcels are already under TikTok Shop ES',
+    );
   });
 
   it('does not touch an Online Store order', async () => {
