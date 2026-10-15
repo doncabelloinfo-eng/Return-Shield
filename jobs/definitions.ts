@@ -905,6 +905,27 @@ export async function shopifyBackfill(): Promise<JobResult> {
     await say(`Hourly check of Shopify found ${created} parcels whose webhook never arrived`);
   }
 
+  /*
+   * A channel nobody allowed gets said out loud, once a day.
+   *
+   * The two counters above go into `job_runs.detail`, and nothing renders that
+   * column — so docs/deploying.md was promising the operator a signal ("an
+   * hourly backfill that reads 250 orders and creates none") that existed
+   * nowhere in the app. The ticker is where they would see it.
+   *
+   * Only `otherChannelSkipped`: TikTok is expected and is most of the store's
+   * traffic, so an hourly line about it would be noise. And deduped per
+   * Madrid day, because this runs every hour and the same misconfiguration is
+   * one piece of news, not twenty-four.
+   */
+  if (otherChannelSkipped > 0) {
+    await say(
+      `${otherChannelSkipped} Shopify ${otherChannelSkipped === 1 ? 'order' : 'orders'} came from `
+      + 'a channel this shop does not allow — check SHOPIFY_<KEY>_ORDER_SOURCES',
+      { dedupeKey: `other-channel:${madridDateKey(now())}` },
+    );
+  }
+
   return { detail: { checked, created, tiktokSkipped, otherChannelSkipped, skipped } };
 }
 

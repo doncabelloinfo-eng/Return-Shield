@@ -281,9 +281,10 @@ SHOPIFY_DONCABELLO_ORDER_SOURCES=web,shopify_draft_order,2329312
 ```
 
 Setting it to just `2329312` would refuse every Online Store and Draft Orders
-order, and a refused order writes nothing at all — so the only sign would be
-the pull's "skipped from other channels" count and an hourly backfill that
-reads 250 orders and creates none. If in doubt, leave the variable unset.
+order, and a refused order writes nothing at all. Two things would tell you:
+the pull's "skipped from other channels" count, and a ticker line once a day —
+"N Shopify orders came from a channel this shop does not allow" — written by
+the hourly backfill. If in doubt, leave the variable unset.
 
 **The orders already pulled in** are moved back by a button on Settings →
 Shopify, "TikTok orders pulled from Shopify": it previews, then re-points each

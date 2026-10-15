@@ -1,6 +1,6 @@
-import { and, eq, sql as raw } from 'drizzle-orm';
+import { and, eq, inArray, sql as raw } from 'drizzle-orm';
 import { getDb, rowsOf } from '@/db';
-import { orders, shipments, stores } from '@/db/schema';
+import { closures, orders, shipments, stores } from '@/db/schema';
 import { now } from '@/lib/clock';
 import { say } from '@/lib/activity';
 import { SOURCE_STORE } from '@/lib/import/parse';
@@ -28,7 +28,9 @@ import { TIKTOK_TAG_PREFIX, tiktokOrderIdFromTags } from '@/lib/carriers/shopify
  * WHAT IT MOVES, AND WHAT IT KEEPS. The shipment ROW is re-pointed, never
  * recreated: its id, state, events, contact log, tasks and closures all hang
  * off that id, so recreating it would lose every bit of tracking history the
- * parcel has. The Shopify order row then goes, once nothing points at it —
+ * parcel has. A write-off's own row keeps its reason, note, value and code and
+ * is re-filed under the TikTok shop, because the Closures screen's shop filter
+ * reads the name copied into that row — see the note further down. The Shopify order row then goes, once nothing points at it —
  * and the guard matters, because `shipments.order_id` cascades on delete, so
  * deleting the order first would take the parcel with it.
  */
@@ -281,8 +283,8 @@ export async function applyTikTokHandover(): Promise<HandoverResult> {
 
         if (target.fresh) tiktokOrdersCreated += 1;
 
-        // The ROW moves. Its id, state, events, contact log, tasks and closures
-        // are all untouched, which is the whole point of not recreating it.
+        // The ROW moves. Its id, state, events, contact log and tasks are all
+        // untouched, which is the whole point of not recreating it.
         const movedRows = await tx.update(shipments)
           .set({ orderId: target.id })
           .where(eq(shipments.orderId, o.orderId))
@@ -290,6 +292,29 @@ export async function applyTikTokHandover(): Promise<HandoverResult> {
 
         moved += movedRows.length;
         if (!firstShipmentId && movedRows[0]) firstShipmentId = movedRows[0].id;
+
+        /*
+         * AND THE WRITE-OFFS FOLLOW THE PARCEL.
+         *
+         * `closures` copies the shop name and the order number in at closing
+         * time, on purpose: the row outlives the parcel the thirty-day cleanup
+         * removes. Which means re-pointing `shipments.order_id` leaves a
+         * closed parcel's permanent record still saying "Don Cabello
+         * Profesional" and "#22685" — and the Closures screen builds its shop
+         * filter from `closures.store_name` (lib/views/closures.ts), so a
+         * written-off TikTok parcel would stay filed under the Shopify chip
+         * and still be missing when the TikTok Shop team filters by their own
+         * shop. That is the original complaint surviving the fix for every
+         * parcel that had already been given up on.
+         *
+         * `shipment_id` goes null when the cleanup takes the parcel, so an
+         * older closure cannot be matched and is left as the history it is.
+         */
+        if (movedRows.length) {
+          await tx.update(closures)
+            .set({ storeName: spec.name, orderNumber: tiktokOrderId })
+            .where(inArray(closures.shipmentId, movedRows.map((r) => r.id)));
+        }
       }
 
       /*

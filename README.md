@@ -317,11 +317,24 @@ Adding a store needs no code: a row in `stores`, a webhook made in that store's
 Shopify admin, and an Admin API token from a per-store custom app. The
 procedure is in [docs/deploying.md](docs/deploying.md#adding-a-shopify-store).
 
-Orders that Shopify syncs in from TikTok are **deliberately ignored** — they
-carry `PKA6TP…` codes with no carrier name, so `isCorreos` does not recognise
-them. TikTok comes in through the file upload on the Import screen, and
-teaching `isCorreos` to accept a bare `PKA6TP…` would ingest those orders
-twice.
+**Only the Online Store and Draft Orders come from Shopify.** The TikTok sales
+channel is installed on this shop, so every TikTok Shop order is also a Shopify
+order — 235 of the store's last 250, against 12 from the Online Store and 3
+Draft Orders — and taking them put the parcel under the Shopify shop with a
+Shopify order number, where the TikTok Shop filter could not see it.
+
+One check at the top of `ingestShopifyOrder`, which is the one function the
+webhook, the hourly backfill and the thirty-day pull all go through: the
+order's `source_name` must be in that shop's allowlist (`web` and
+`shopify_draft_order` by default, per store in
+`SHOPIFY_<KEY>_ORDER_SOURCES`), with `app_id` as the fallback when Shopify
+sends no `source_name`, and an order tagged `TikTokOrderID:` is never taken
+whatever its channel says. A refused order writes nothing at all and the
+webhook still answers 200. TikTok orders come in through the file upload on the
+Import screen instead, and the ones already pulled were handed back by the
+button on Settings → Shopify. See
+[docs/deploying.md](docs/deploying.md#adding-a-shopify-store) and
+`lib/carriers/shopify/channel.ts`.
 
 ### Uploading TikTok and Amazon files
 

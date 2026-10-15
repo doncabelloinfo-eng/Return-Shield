@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterAll } from 'vitest';
 import { eq, inArray } from 'drizzle-orm';
 import { getDb } from '@/db';
 import {
-  activity, contactLog, orders, shipmentEvents, shipments, stores, users,
+  activity, closures, contactLog, orders, shipmentEvents, shipments, stores, users,
 } from '@/db/schema';
 import { TestClock, resetClock } from '@/lib/clock';
 import { buildPreview, parseFile } from '@/lib/import/parse';
@@ -412,6 +412,63 @@ describe('the apply', () => {
       .where(eq(shipmentEvents.shipmentId, shipmentId!))).toHaveLength(2);
     expect(await getDb().select().from(contactLog)
       .where(eq(contactLog.shipmentId, shipmentId!))).toHaveLength(1);
+  });
+
+  it('takes the write-off with it, so a closed parcel is filed under TikTok too', async () => {
+    /*
+     * `closures` copies the shop name and the order number in at closing time,
+     * on purpose: the row outlives the parcel the thirty-day cleanup removes.
+     * So re-pointing the shipment alone left a written-off TikTok parcel's
+     * permanent record saying "Don Cabello Profesional" / "#22685" — and the
+     * Closures screen builds its shop filter from that column, so the parcel
+     * stayed filed under the Shopify chip and was still missing when the
+     * TikTok Shop team filtered by their own shop. The original complaint,
+     * surviving the fix, for every parcel already given up on.
+     */
+    const { shipmentId } = await shopifyOrder({
+      number: '#22685', tiktokId: TIKTOK_ID, code: 'PKA6TP9800094740148903F',
+    });
+    const online = await shopifyOrder({ number: '#22688', code: 'PQ3000012345ES' });
+
+    await getDb().insert(closures).values([{
+      shipmentId: shipmentId!,
+      orderNumber: '#22685',
+      storeName: 'Don Cabello Profesional',
+      shippingCode: 'PKA6TP9800094740148903F',
+      reason: 'lost',
+      note: 'never arrived',
+      valueCents: 4190,
+      daysSinceOrder: 9,
+      closedAt: clock.now(),
+    }, {
+      shipmentId: online.shipmentId!,
+      orderNumber: '#22688',
+      storeName: 'Don Cabello Profesional',
+      shippingCode: 'PQ3000012345ES',
+      reason: 'lost',
+      note: 'nothing to do with TikTok',
+      valueCents: 2500,
+      daysSinceOrder: 4,
+      closedAt: clock.now(),
+    }]);
+
+    await applyTikTokHandover();
+
+    const moved = await getDb().select().from(closures)
+      .where(eq(closures.shipmentId, shipmentId!));
+    expect(moved[0].storeName).toBe('TikTok Shop ES');
+    expect(moved[0].orderNumber).toBe(TIKTOK_ID);
+    // Everything else about the record is the history it was.
+    expect(moved[0].reason).toBe('lost');
+    expect(moved[0].note).toBe('never arrived');
+    expect(moved[0].shippingCode).toBe('PKA6TP9800094740148903F');
+    expect(moved[0].valueCents).toBe(4190);
+
+    // And the Online Store write-off is not touched.
+    const left = await getDb().select().from(closures)
+      .where(eq(closures.shipmentId, online.shipmentId!));
+    expect(left[0].storeName).toBe('Don Cabello Profesional');
+    expect(left[0].orderNumber).toBe('#22688');
   });
 
   it('writes one ticker line, naming the shop it came from', async () => {

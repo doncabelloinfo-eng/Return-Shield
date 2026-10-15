@@ -1358,6 +1358,33 @@ orders, report success and create nothing, for ever. Its detail now carries
 `tiktokSkipped` and `otherChannelSkipped`, and `otherChannelSkipped` above zero
 is the one to look at: TikTok is expected, a channel nobody allowed is not.
 
+### And the write-offs were left behind
+
+`closures` copies the shop name and the order number in at closing time, on
+purpose: the row outlives the parcel the thirty-day cleanup removes. So
+re-pointing `shipments.order_id` left a written-off TikTok parcel's permanent
+record still saying "Don Cabello Profesional" and "#22685" — and the Closures
+screen builds its shop filter from that very column, so the parcel stayed filed
+under the Shopify chip and was still missing when the TikTok Shop team filtered
+by their own shop. The original complaint, surviving the fix, for every parcel
+already given up on.
+
+The closure row now follows the parcel: the shop name and order number are
+corrected inside the same transaction, and its reason, note, value and tracking
+code are the history they were. This goes a little beyond the brief's
+"closures stay as they are" — that sentence was about not losing anything by
+recreating the shipment, and leaving these two fields behind would have
+defeated the thing the whole change is for.
+
+Two more from the same pass. The README still said Shopify's TikTok orders were
+"deliberately ignored" because `isCorreos` does not recognise a bare `PKA6TP…`
+code — which was never true (the webhook took 235 of 250) and is now the wrong
+mechanism entirely. And the backfill's two new counters went into
+`job_runs.detail`, which no screen renders, so docs/deploying.md was promising
+a signal that existed nowhere: a channel nobody allowed now says so in the
+ticker, once a Madrid day, deduped because the job runs hourly and one
+misconfiguration is one piece of news.
+
 Finally, the preview now says how many parcels will lose the Shopify name,
 phone and address, because the move cannot be undone and that is the one thing
 it throws away. The data still goes — the brief asked for the TikTok upload's
