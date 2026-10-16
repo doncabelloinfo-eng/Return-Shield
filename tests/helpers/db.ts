@@ -34,7 +34,12 @@ export async function resetDb(): Promise<void> {
       correos_push_inbox, event_review_queue, activity,
       shipments, orders, offices, stores, import_batches,
       product_rules, postcode_stats, settings, job_runs,
-      sessions, users, action_rate_limit, job_locks, alerts
+      sessions, action_rate_limit, job_locks, alerts,
+      -- Named explicitly rather than left to CASCADE: scans deliberately have
+      -- no foreign key to shipments (that is the whole point of them), so
+      -- truncating parcels does not take them, and a scan left behind between
+      -- files would badge the next file's fixtures.
+      scans, scan_batches, users
     RESTART IDENTITY CASCADE
   `;
 }

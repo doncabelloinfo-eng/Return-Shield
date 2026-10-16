@@ -9,3 +9,8 @@ build/
 coverage/
 .pgdata/
 tsconfig.tsbuildinfo
+
+# Copied out of node_modules by `prebuild`, about 950 KB, and identical for a
+# given version of zxing-wasm — which package-lock.json already pins. See
+# scripts/copy-zxing-wasm.mjs.
+public/zxing_reader.wasm

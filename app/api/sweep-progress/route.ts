@@ -52,6 +52,15 @@ export async function GET(): Promise<NextResponse> {
       { status: 401, headers: { 'Cache-Control': 'no-store' } },
     );
   }
+  // Operators only. Nothing in the Scanner polls this, and a role check on
+  // every panel route — not only the ones that look sensitive — is what makes
+  // "a scanner session can never use the panel" something a test can prove.
+  if (user.role !== 'operator') {
+    return NextResponse.json(
+      { error: 'forbidden' },
+      { status: 403, headers: { 'Cache-Control': 'no-store' } },
+    );
+  }
 
   await loadDemoClock();
   const at = now();

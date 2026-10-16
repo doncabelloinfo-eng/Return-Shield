@@ -2,6 +2,7 @@
 
 import { revalidatePath } from 'next/cache';
 import { cookies } from 'next/headers';
+import { requireUser } from '@/lib/auth/guard';
 
 /**
  * What is left of the Settings actions.
@@ -25,7 +26,18 @@ import { cookies } from 'next/headers';
  * control is not.
  */
 
+/**
+ * `requireUser` even for a cookie.
+ *
+ * It had no guard, on the reasoning that the control lives in a top bar only
+ * operators ever see and all it sets is a theme. Both halves are true and
+ * neither is the point: a server action is a public endpoint whatever the page
+ * around it looks like, and "every panel action refuses a scanner session" is
+ * only worth testing if it holds for all of them. One exception is how a rule
+ * stops being a rule.
+ */
 export async function toggleTheme(next: 'light' | 'dark') {
+  await requireUser();
   cookies().set('rs_theme', next, { path: '/', maxAge: 60 * 60 * 24 * 365, sameSite: 'lax' });
   revalidatePath('/', 'layout');
 }

@@ -59,6 +59,23 @@ export async function GET(req: Request): Promise<NextResponse> {
       headers: { 'Cache-Control': 'no-store' },
     });
   }
+  /*
+   * OPERATORS ONLY, like every other panel route.
+   *
+   * This one is worth saying out loud: the file carries every column of the
+   * tab, and a warehouse phone is the account most likely to be lost. The
+   * Scanner is deliberately built to know a code, an order number and a shop
+   * name and nothing else, and a download it could reach would undo that in
+   * one request. The guard is here rather than in `currentUser` because this
+   * route answers a fetch, not a navigation, and a redirect would arrive as
+   * an unparseable body.
+   */
+  if (user.role !== 'operator') {
+    return new NextResponse('This download is for Return Shield accounts.', {
+      status: 403,
+      headers: { 'Cache-Control': 'no-store' },
+    });
+  }
 
   const params = new URL(req.url).searchParams;
   const status = params.get('status') ?? '';

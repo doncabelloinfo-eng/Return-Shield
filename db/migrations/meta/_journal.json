@@ -50,6 +50,13 @@
       "when": 1791331696111,
       "tag": "0006_ship_date",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1791418096111,
+      "tag": "0007_scanner",
+      "breakpoints": true
     }
   ]
 }

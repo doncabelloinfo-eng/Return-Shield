@@ -1,5 +1,7 @@
 import { getDb } from '@/db';
-import { offices, orders, productRules, shipments, stores } from '@/db/schema';
+import { offices, orders, productRules, shipments, stores, users } from '@/db/schema';
+import { hashPassword } from '@/lib/auth/password';
+import type { UserRole } from '@/lib/auth/roles';
 
 /**
  * One parcel, set up the way the real system sets one up. Everything a test
@@ -132,4 +134,45 @@ export function correosPush(
         : {}),
     })),
   };
+}
+
+/* --------------------------------------------------------------------- users */
+
+export interface MakeUserOptions {
+  email?: string;
+  name?: string;
+  /** `operator` is the default, exactly as the column's own default is. */
+  role?: UserRole;
+  /** Hashed properly when given, so a sign-in test can actually sign in. */
+  password?: string;
+  disabled?: boolean;
+}
+
+export interface UserFixture {
+  id: string;
+  email: string;
+  name: string;
+  role: UserRole;
+}
+
+/**
+ * One account. The Scanner put two kinds in the database, so a test that cares
+ * which kind has to be able to say so in one line.
+ */
+export async function makeUser(opts: MakeUserOptions = {}): Promise<UserFixture> {
+  const role: UserRole = opts.role ?? 'operator';
+  const email = (opts.email ?? `${role}-${Math.floor(Math.random() * 1e9)}@example.com`).toLowerCase();
+  const name = opts.name ?? (role === 'scanner' ? 'Warehouse' : 'Op');
+
+  const [row] = await getDb().insert(users).values({
+    email,
+    name,
+    // `scrypt` with the production parameters takes about a tenth of a second,
+    // so a test that does not sign in does not pay for it.
+    passwordHash: opts.password ? await hashPassword(opts.password) : 'x',
+    role,
+    ...(opts.disabled ? { disabledAt: new Date('2026-10-01T00:00:00Z') } : {}),
+  }).returning({ id: users.id });
+
+  return { id: row.id, email, name, role };
 }

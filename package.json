@@ -4,6 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "prebuild": "node scripts/copy-zxing-wasm.mjs",
     "build": "next build",
     "start": "next start",
     "worker": "tsx jobs/worker.ts",
@@ -29,7 +30,8 @@
     "postgres": "^3.4.9",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "zod": "^4.6.2"
+    "zod": "^4.6.2",
+    "zxing-wasm": "3.1.4"
   },
   "devDependencies": {
     "@types/node": "^22.20.2",

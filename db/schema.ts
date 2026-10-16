@@ -1,5 +1,7 @@
 import { sql } from 'drizzle-orm';
 import type { CloseReason } from '@/lib/escalation/close-reasons';
+import type { UserRole } from '@/lib/auth/roles';
+import type { ScanDirection, ScanSource } from '@/lib/scan/model';
 import {
   pgTable, text, integer, bigint, boolean, timestamp, jsonb, uuid,
   uniqueIndex, index, primaryKey, doublePrecision, check,
@@ -16,10 +18,21 @@ export const users = pgTable('users', {
   email: text('email').notNull(),
   name: text('name').notNull(),
   passwordHash: text('password_hash').notNull(),
+  /**
+   * `operator` — the office and the panel. `scanner` — a warehouse phone and
+   * `/scan`, and nothing else in the app.
+   *
+   * Defaulted rather than backfilled: every account that existed before the
+   * Scanner was built is an operator, and the column can be added to a running
+   * database without the code live at the time knowing it is there. See
+   * lib/auth/roles.ts.
+   */
+  role: text('role').notNull().default('operator').$type<UserRole>(),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   disabledAt: timestamp('disabled_at', { withTimezone: true }),
 }, (t) => ({
   emailIdx: uniqueIndex('users_email_idx').on(t.email),
+  roleValid: check('users_role_valid', sql`role IN ('operator', 'scanner')`),
 })).enableRLS();
 
 export const sessions = pgTable('sessions', {
@@ -188,6 +201,16 @@ export const shipments = pgTable('shipments', {
   // The retention window, the "Stuck 30+ days" tab and the date filter all
   // select on the ship date.
   shippedIdx: index('shipments_shipped_idx').on(t.shippedAt),
+  /*
+   * The Scanner matches a code on its first fifteen characters — the one part
+   * the Código de Bulto and the EXPEDICIÓN have in common, and `shipping_code`
+   * holds whichever of the two its source gave us.
+   *
+   * A functional index because `left(shipping_code, 15) = $1` cannot use the
+   * unique index on the whole code, and that lookup runs once per parcel
+   * scanned, on a phone, with somebody holding a box.
+   */
+  codeBaseIdx: index('shipments_code_base_idx').on(sql`left("shipping_code", 15)`),
 })).enableRLS();
 
 /**
@@ -609,4 +632,113 @@ export const closures = pgTable('closures', {
   closedIdx: index('closures_closed_idx').on(t.closedAt),
   reasonIdx: index('closures_reason_idx').on(t.reason, t.closedAt),
   shipmentIdx: index('closures_shipment_idx').on(t.shipmentId),
+})).enableRLS();
+
+/* ---------------------------------------------------------------------------
+ * Scanner: the warehouse phone.
+ *
+ * Two tables, and NEITHER HAS A FOREIGN KEY TO `shipments`. That is the whole
+ * design of this corner of the database.
+ *
+ * A scan is a fact about a cardboard box: this code was read, by this person,
+ * at this time. It is true whether or not Return Shield has ever heard of the
+ * parcel — a TikTok or Amazon parcel is often scanned out days before its file
+ * is uploaded, and a return often arrives after the rolling thirty-day window
+ * has deleted the order it belongs to. So the link to a parcel is the CODE,
+ * worked out when the panel reads a scan rather than frozen at scan time, and
+ * the scans are kept on their own ninety-day clock (lib/scan/model.ts).
+ * ------------------------------------------------------------------------- */
+
+/**
+ * One pile of parcels, worked through by one person in one direction.
+ *
+ * At most one open batch per worker per direction, enforced by the partial
+ * unique index below rather than by the code that opens one: a phone with a
+ * weak signal retries, and two opens racing would otherwise split a pile
+ * across two batches whose counts both look wrong.
+ */
+export const scanBatches = pgTable('scan_batches', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  direction: text('direction').notNull().$type<ScanDirection>(),
+  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
+  /** Null while it is open. Set by "Finish batch". */
+  finishedAt: timestamp('finished_at', { withTimezone: true }),
+}, (t) => ({
+  openIdx: uniqueIndex('scan_batches_open_idx').on(t.userId, t.direction)
+    .where(sql`finished_at IS NULL`),
+  startedIdx: index('scan_batches_started_idx').on(t.startedAt),
+  directionValid: check(
+    'scan_batches_direction_valid',
+    sql`direction IN ('outgoing', 'incoming')`,
+  ),
+})).enableRLS();
+
+/**
+ * One parcel, read at least once, in one batch.
+ *
+ * `read_ids` IS WHAT MAKES A RETRY FREE. The phone stores every read in
+ * IndexedDB with an id of its own and keeps sending it until the server says it
+ * has it — because "beep means it is saved" has to stay true in a warehouse
+ * with no signal. So the server records which reads it has already counted,
+ * and a read it has seen before changes nothing at all. Without it, a retried
+ * read of a parcel already in the batch would quietly turn into "scanned
+ * twice", and the batch counts the operator reads would be wrong.
+ *
+ * `times_read` is `cardinality(read_ids)`, written in the same statement that
+ * appends to it, so the two cannot drift.
+ */
+export const scans = pgTable('scans', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  batchId: uuid('batch_id').notNull().references(() => scanBatches.id, { onDelete: 'cascade' }),
+  /**
+   * Copied from the batch rather than joined to it.
+   *
+   * The Returns tab asks for "every incoming scan of the last ninety days,
+   * newest first" over a table that keeps growing, and a join to get the
+   * direction would put the batch table in the middle of that index.
+   */
+  direction: text('direction').notNull().$type<ScanDirection>(),
+  userId: uuid('user_id').notNull().references(() => users.id),
+  scannedAt: timestamp('scanned_at', { withTimezone: true }).notNull().defaultNow(),
+  /** The code exactly as read or typed, normalised: A–Z and 0–9, uppercase. */
+  codeAsRead: text('code_as_read').notNull(),
+  /** Its first 15 characters. What a parcel is matched on. */
+  base: text('base').notNull(),
+  /** "01", from a Código de Bulto. Null when the EXPEDICIÓN was read. */
+  parcelNo: text('parcel_no'),
+  /** The postcode printed inside the bulto code. Shown on the row. */
+  postalCode: text('postal_code'),
+  source: text('source').notNull().$type<ScanSource>(),
+  /** Every read of this parcel in this batch, by the id the phone gave it. */
+  readIds: text('read_ids').array().notNull(),
+  timesRead: integer('times_read').notNull().default(1),
+  /**
+   * The order number and shop AS THEY WERE WHEN IT WAS SCANNED, or null when
+   * nothing matched.
+   *
+   * A copy, on purpose, and the reason the Returns tab can be trusted: the
+   * thirty-day cleanup removes the parcel, and a matched return has to stay
+   * under "From Return Shield" for the whole ninety days rather than jumping to
+   * "Not in Return Shield" on day 31.
+   */
+  orderNumber: text('order_number'),
+  storeName: text('store_name'),
+}, (t) => ({
+  /**
+   * The same code twice in one batch is one parcel, read twice — never two
+   * rows. This index is what makes that true under a retry, a double tap and
+   * two phones, rather than only in the code path that normally runs.
+   */
+  batchCodeIdx: uniqueIndex('scans_batch_code_idx').on(t.batchId, t.codeAsRead),
+  /** Matching a parcel: by base, newest first, per direction. */
+  baseIdx: index('scans_base_idx').on(t.base, t.direction, t.scannedAt),
+  /** The Returns tab, and the ninety-day cleanup. */
+  directionTimeIdx: index('scans_direction_time_idx').on(t.direction, t.scannedAt),
+  /** "Last scan" on the Scanner accounts list. */
+  userTimeIdx: index('scans_user_time_idx').on(t.userId, t.scannedAt),
+  /** The open batch, newest first, which is the phone's own list. */
+  batchTimeIdx: index('scans_batch_time_idx').on(t.batchId, t.scannedAt),
+  sourceValid: check('scans_source_valid', sql`source IN ('barcode', 'typed')`),
+  directionValid: check('scans_direction_valid', sql`direction IN ('outgoing', 'incoming')`),
 })).enableRLS();

@@ -78,3 +78,10 @@ input, textarea, button, select { font-family: inherit; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
+
+/* The Scanner's banner countdown: the bar that empties while the next scan
+   starts by itself (images 4 and 5). The blanket reduced-motion override above
+   collapses it instantly, which is fine: it is decoration beside a line of
+   words that says the same thing. */
+@keyframes scan-countdown { from { width: 100%; } to { width: 0%; } }
+.scan-countdown { animation: scan-countdown 1.2s linear forwards; }
