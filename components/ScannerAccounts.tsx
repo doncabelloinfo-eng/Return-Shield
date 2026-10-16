@@ -85,9 +85,17 @@ export function ScannerAccounts({ workers }: { workers: WorkerLine[] }) {
         <Worker key={w.id} worker={w} pending={pending} onToggle={toggle} onError={setError} onSaid={setSaid} />
       ))}
 
+      {/*
+        `onSubmit` rather than `action={add}`: a form `action` that takes a
+        function is a server action, and this is a client function that calls
+        one.
+      */}
       <div className="border-b border-line px-[14px] py-[11px]">
         {adding ? (
-          <form action={add} className="flex flex-col gap-[10px]">
+          <form
+            onSubmit={(e) => { e.preventDefault(); add(new FormData(e.currentTarget)); }}
+            className="flex flex-col gap-[10px]"
+          >
             <div className="flex flex-wrap gap-[10px]">
               <label className="flex flex-col gap-[4px]">
                 <span className="text-[11px] font-semibold text-ink">Name</span>

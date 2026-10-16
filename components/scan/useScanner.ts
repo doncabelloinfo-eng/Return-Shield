@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
 import { prepareZXingModule, readBarcodes } from 'zxing-wasm/reader';
 import { parseCorreosCode, type CorreosCode } from '@/lib/scan/codes';
 
@@ -65,7 +65,7 @@ function prepareDecoder(): void {
 }
 
 export interface ScannerHandle {
-  videoRef: React.RefObject<HTMLVideoElement>;
+  videoRef: RefObject<HTMLVideoElement>;
   status: ScannerStatus;
   cameraError: string;
   torchAvailable: boolean;

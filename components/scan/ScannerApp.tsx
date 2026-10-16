@@ -129,24 +129,20 @@ export function ScannerApp({
       if (!id) return;
 
       for (const read of waiting) {
-        let res: Response;
-        try {
-          res = await fetch('/api/scan/scan', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              batchId: id,
-              readId: read.readId,
-              code: read.code,
-              source: read.source,
-              at: read.at,
-            }),
-          });
-        } catch {
-          // No network. Everything still queued; try again shortly.
-          await countTry(read);
-          return;
-        }
+        const res = await fetch('/api/scan/scan', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            batchId: id,
+            readId: read.readId,
+            code: read.code,
+            source: read.source,
+            at: read.at,
+          }),
+        }).catch(() => null);
+
+        // No network. Everything is still queued; try again in a moment.
+        if (!res) { await countTry(read); return; }
 
         if (res.status === 401) { setSignedOut(true); return; }
 

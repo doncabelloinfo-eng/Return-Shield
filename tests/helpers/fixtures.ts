@@ -1,7 +1,10 @@
 import { getDb } from '@/db';
-import { offices, orders, productRules, shipments, stores, users } from '@/db/schema';
+import { offices, orders, productRules, scans, shipments, stores, users } from '@/db/schema';
 import { hashPassword } from '@/lib/auth/password';
 import type { UserRole } from '@/lib/auth/roles';
+import { parseCorreosCode } from '@/lib/scan/codes';
+import { openBatch } from '@/lib/scan/batches';
+import type { ScanDirection, ScanSource } from '@/lib/scan/model';
 
 /**
  * One parcel, set up the way the real system sets one up. Everything a test
@@ -32,6 +35,8 @@ export interface MakeShipmentOptions {
   shopDomain?: string | null;
   /** Shopify's numeric order id. The default is deliberately not numeric. */
   externalOrderId?: string;
+  /** `shopify` unless a test is about what a marketplace row looks like. */
+  platform?: 'shopify' | 'tiktok' | 'amazon';
 }
 
 export interface Fixture {
@@ -60,7 +65,7 @@ export async function makeShipment(opts: MakeShipmentOptions = {}): Promise<Fixt
   const [store] = await getDb().insert(stores).values({
     key: storeKey,
     name: opts.storeName ?? 'Cosmetics Afro Latino',
-    platform: 'shopify',
+    platform: opts.platform ?? 'shopify',
     ingest: 'auto',
     ...(opts.shopDomain !== undefined ? { shopDomain: opts.shopDomain } : {}),
   }).onConflictDoUpdate({
@@ -175,4 +180,60 @@ export async function makeUser(opts: MakeUserOptions = {}): Promise<UserFixture>
   }).returning({ id: users.id });
 
   return { id: row.id, email, name, role };
+}
+
+/* --------------------------------------------------------------------- scans */
+
+export interface MakeScanOptions {
+  /** The code as the warehouse read it. Parsed, so it must be a real one. */
+  code: string;
+  /** Who scanned it. A real row: `scans.user_id` is a foreign key. */
+  userId: string;
+  direction?: ScanDirection;
+  at?: Date;
+  source?: ScanSource;
+  /** Reuse an open batch instead of this worker's current one. */
+  batchId?: string;
+  /**
+   * The order number and shop copied onto the scan when it was taken.
+   *
+   * Left null by default, so a test has to ASK for the copy — which is the
+   * thing being tested when a matched return has to survive its parcel being
+   * cleaned up.
+   */
+  orderNumber?: string | null;
+  storeName?: string | null;
+}
+
+/**
+ * One scan, written straight to the table.
+ *
+ * For setting up what the panel then reads. A test about the scanning path
+ * itself should go through `addScan`, which is what the phone calls and which
+ * does the matching, the copying and the duplicate rule.
+ */
+export async function makeScan(opts: MakeScanOptions): Promise<{ id: string; batchId: string }> {
+  const code = parseCorreosCode(opts.code);
+  if (!code) throw new Error(`makeScan: "${opts.code}" is not a Correos code`);
+
+  const direction = opts.direction ?? 'outgoing';
+  const batchId = opts.batchId ?? (await openBatch(opts.userId, direction)).id;
+
+  const [row] = await getDb().insert(scans).values({
+    batchId,
+    direction,
+    userId: opts.userId,
+    scannedAt: opts.at ?? new Date(),
+    codeAsRead: code.raw,
+    base: code.base,
+    parcelNo: code.parcelNo,
+    postalCode: code.postalCode,
+    source: opts.source ?? 'barcode',
+    readIds: [`fixture-${Math.random().toString(36).slice(2)}`],
+    timesRead: 1,
+    orderNumber: opts.orderNumber ?? null,
+    storeName: opts.storeName ?? null,
+  }).returning({ id: scans.id });
+
+  return { id: row.id, batchId };
 }

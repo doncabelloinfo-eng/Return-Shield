@@ -1,12 +1,9 @@
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { cookies } from 'next/headers';
-import { eq } from 'drizzle-orm';
-import { getDb } from '@/db';
-import { users } from '@/db/schema';
-import { verifyPassword } from '@/lib/auth/password';
 import { createSession, currentUser, SESSION_COOKIE, sessionCookieOptions } from '@/lib/auth/session';
-import { asUserRole, HOME_FOR, WRONG_FORM_FOR } from '@/lib/auth/roles';
+import { attemptSignIn } from '@/lib/auth/sign-in';
+import { HOME_FOR, WRONG_FORM_FOR } from '@/lib/auth/roles';
 
 // Per-request, behind a login or a signed token, and it reads the database.
 // Saying so explicitly keeps it out of the build's static render pass, which
@@ -45,25 +42,22 @@ export default async function LoginPage({
   async function signIn(form: FormData) {
     'use server';
 
-    const email = String(form.get('email') ?? '').trim().toLowerCase();
-    const password = String(form.get('password') ?? '');
-    if (!email || !password) redirect('/login?as=panel&error=1');
+    const answer = await attemptSignIn(
+      String(form.get('email') ?? ''),
+      String(form.get('password') ?? ''),
+      'operator',
+    );
 
-    const [user] = await getDb().select().from(users).where(eq(users.email, email)).limit(1);
-
-    // Verify even when there is no such user, so a missing account and a wrong
-    // password take the same amount of time to fail.
-    const dummy = 'scrypt$32768$8$1$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAA';
-    const ok = await verifyPassword(password, user?.passwordHash ?? dummy);
-
-    if (!user || !ok || user.disabledAt) redirect('/login?as=panel&error=1');
-
+    // A disabled office account is told nothing beyond "that did not match":
+    // unlike the warehouse, whoever runs the office can look the account up
+    // themselves, and there is nobody for them to go and ask.
+    if (!answer.ok && answer.reason !== 'wrong-form') redirect('/login?as=panel&error=1');
     // The right password for a warehouse account. Say so, and say which button
     // to press: this form cannot sign a scanner in, because `requireUser`
     // would refuse it on the next page anyway.
-    if (asUserRole(user.role) !== 'operator') redirect('/login?as=panel&error=role');
+    if (!answer.ok) redirect('/login?as=panel&error=role');
 
-    const token = await createSession(user.id);
+    const token = await createSession(answer.userId);
     cookies().set(SESSION_COOKIE, token, sessionCookieOptions());
     redirect('/today');
   }
