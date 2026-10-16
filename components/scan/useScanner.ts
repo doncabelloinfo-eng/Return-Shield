@@ -65,7 +65,15 @@ function prepareDecoder(): void {
 }
 
 export interface ScannerHandle {
-  videoRef: RefObject<HTMLVideoElement>;
+  /**
+   * `| null` is not optional here.
+   *
+   * This repo is on `@types/react` 19, where `useRef<T>(null)` is a
+   * `RefObject<T | null>` rather than the old `RefObject<T>` — so the narrower
+   * type does not describe what `useRef` hands back, and `next build` refuses
+   * it. React itself is 18.3; the types are the 19 line.
+   */
+  videoRef: RefObject<HTMLVideoElement | null>;
   status: ScannerStatus;
   cameraError: string;
   torchAvailable: boolean;
