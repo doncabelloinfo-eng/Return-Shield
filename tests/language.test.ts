@@ -116,10 +116,11 @@ describe('the tabs', () => {
 
   it('carry Correos\' word on the status tabs', () => {
     // The ones with no Spanish are the ones Correos has no word for: our own
-    // groupings, and the two stuck tabs.
-    // The ones with no Spanish are the ones Correos has no word for: our own
-    // groupings, and the three stuck tabs.
-    const ours = ['all_open', 'stale', 'stuck_same_status', 'stuck_30', 'closed'];
+    // groupings, the stuck tabs, and the two that read from a different table
+    // altogether — `closed` from `closures`, `returns` from the warehouse's
+    // own scans. Correos has no word for a parcel the warehouse scanned back
+    // in, because Correos has not reported it yet; that is the point of it.
+    const ours = ['all_open', 'stale', 'stuck_same_status', 'stuck_30', 'closed', 'returns'];
     for (const tab of PARCEL_TABS) {
       if (ours.includes(tab.id)) continue;
       expect(tab.es, tab.id).toBeTruthy();

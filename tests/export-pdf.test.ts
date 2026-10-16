@@ -2,8 +2,13 @@ import { describe, it, expect, beforeEach, afterAll, vi } from 'vitest';
 
 // The route is behind the login like every screen, and a test cannot hold a
 // session cookie. One test below asserts the guard is actually called.
-const currentUser = vi.fn(async (): Promise<{ id: string; email: string; name: string } | null> =>
-  ({ id: 'u1', email: 'op@example.com', name: 'Op' }));
+// `role: 'operator'` is not decoration. Every panel route checks it now, and a
+// session without one is refused — which is the point of making `requireUser`
+// operator-only, and is what a warehouse phone gets. See lib/auth/roles.ts.
+const currentUser = vi.fn(
+  async (): Promise<import('@/lib/auth/session').SessionUser | null> =>
+    ({ id: 'u1', email: 'op@example.com', name: 'Op', role: 'operator' }),
+);
 vi.mock('@/lib/auth/session', () => ({ currentUser, SESSION_COOKIE: 'rs_session' }));
 
 const { GET } = await import('@/app/api/parcels/export/route');

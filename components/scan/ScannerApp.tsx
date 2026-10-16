@@ -59,7 +59,16 @@ export function ScannerApp({
   initialBatch: Batch | null;
 }) {
   const [batchId, setBatchId] = useState<string | null>(initialBatch?.id ?? null);
-  const [startedAt, setStartedAt] = useState<string>(initialBatch?.startedAt ?? new Date().toISOString());
+  /*
+   * Null until the server says when the batch started, rather than `new
+   * Date()`.
+   *
+   * This component renders once on the server and again when the browser
+   * hydrates it, and a clock read during render gives two different answers —
+   * which React notices and redraws over. The batch's real start time arrives
+   * with the POST that opens it, a moment later.
+   */
+  const [startedAt, setStartedAt] = useState<string | null>(initialBatch?.startedAt ?? null);
   const [items, setItems] = useState<ScanItem[]>(initialBatch?.items ?? []);
   const [queue, setQueue] = useState<Outgoing[]>([]);
   const [flash, setFlash] = useState<Flash | null>(null);
@@ -255,7 +264,14 @@ export function ScannerApp({
     return () => clearTimeout(timer);
   }, [flash]);
 
-  // "Just now" is time-based, so it needs a tick of its own to come off.
+  /*
+   * "Just now" is time-based, so it needs a tick of its own to come off — and
+   * it must not be decided during the server render at all, for the same
+   * reason `startedAt` is not: the server's clock and the browser's would
+   * disagree about a scan four seconds old.
+   */
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => { setMounted(true); }, []);
   const [, setTick] = useState(0);
   useEffect(() => {
     if (!items.length && !queue.length) return undefined;
@@ -276,7 +292,7 @@ export function ScannerApp({
       sharing: i.sharing,
       timesRead: i.timesRead,
       sending: false,
-      justNow: now - new Date(i.scannedAt).getTime() < JUST_NOW_MS,
+      justNow: mounted && now - new Date(i.scannedAt).getTime() < JUST_NOW_MS,
       remove: { kind: 'scan', id: i.id },
     }));
 
@@ -292,12 +308,12 @@ export function ScannerApp({
         sharing: 0,
         timesRead: 1,
         sending: true,
-        justNow: now - new Date(q.at).getTime() < JUST_NOW_MS,
+        justNow: mounted && now - new Date(q.at).getTime() < JUST_NOW_MS,
         remove: { kind: 'read', readId: q.readId },
       }));
 
     return [...stored, ...sending].sort((a, b) => b.at.localeCompare(a.at));
-  }, [items, queue]);
+  }, [items, queue, mounted]);
 
   const summary = useMemo(() => summarise(items), [items]);
 
@@ -506,7 +522,7 @@ export function ScannerApp({
           </span>
         </button>
         <div className="mt-2 text-center text-[11.5px] text-muted">
-          {worker} · {madridTime(startedAt)}
+          {worker}{startedAt ? ` · ${madridTime(startedAt)}` : ''}
         </div>
       </footer>
 
@@ -527,7 +543,7 @@ export function ScannerApp({
       {sheet === 'finish' && (
         <FinishSheet
           direction={direction}
-          startedAt={startedAt}
+          startedAt={startedAt ?? new Date().toISOString()}
           summary={summary}
           sending={queue.length}
           busy={finishing}

@@ -16,15 +16,20 @@ import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from 'vites
 
 // The poll route authenticates, so the session is stubbed and one test below
 // asserts a signed-out request is turned away.
-const currentUser = vi.fn(async (): Promise<{ id: string; email: string; name: string } | null> =>
-  ({ id: 'u', email: 'op@example.com', name: 'Op' }));
+// `role: 'operator'` is not decoration. Every panel route checks it now, and a
+// session without one is refused — which is the point of making `requireUser`
+// operator-only, and is what a warehouse phone gets. See lib/auth/roles.ts.
+const currentUser = vi.fn(
+  async (): Promise<import('@/lib/auth/session').SessionUser | null> =>
+    ({ id: 'u', email: 'op@example.com', name: 'Op', role: 'operator' }),
+);
 vi.mock('@/lib/auth/session', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/auth/session')>()),
   currentUser,
 }));
 // The Refresh action is a public endpoint whatever the page looks like.
 vi.mock('@/lib/auth/guard', () => ({
-  requireUser: vi.fn(async () => ({ id: 'u', email: 'op@example.com', name: 'Op' })),
+  requireUser: vi.fn(async () => ({ id: 'u', email: 'op@example.com', name: 'Op', role: 'operator' })),
 }));
 vi.mock('next/cache', () => ({ revalidatePath: vi.fn() }));
 
@@ -51,7 +56,7 @@ beforeEach(async () => {
   clock = new TestClock(NOW);
   clock.install();
   currentUser.mockClear();
-  currentUser.mockResolvedValue({ id: 'u', email: 'op@example.com', name: 'Op' });
+  currentUser.mockResolvedValue({ id: 'u', email: 'op@example.com', name: 'Op', role: 'operator' });
 });
 
 afterEach(() => { setTrackpub(null); });

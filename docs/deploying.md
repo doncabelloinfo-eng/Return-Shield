@@ -454,6 +454,65 @@ of sent — visible in the Vercel function logs, but nobody's inbox.
 
 ---
 
+## The Scanner
+
+The warehouse phone app lives at `/scan` in the same deploy. **It needs no
+environment variables at all** — no key, no separate host, no third-party
+service. What it needs is migration `0007_scanner.sql` applied before the code
+that reads it goes live, like every other migration here.
+
+### The URLs
+
+| Where | What |
+| --- | --- |
+| `/login` | opens with the choice: **Login as Return Shield** or **Login as Scanner** |
+| `/login?as=panel` | the office form, unchanged |
+| `/scan/login` | the warehouse sign-in, with "Keep me signed in on this phone" |
+| `/scan` | outgoing or incoming, then the camera |
+| `/parcels?status=returns` | the **Returns** tab: ninety days of incoming scans |
+
+### Making the first worker
+
+**Settings → Scanner accounts → Add a worker.** Type their name, an email and a
+password; the password is shown as you type, because you are going to read it
+out to somebody standing next to you. Then send them to `/scan/login` on their
+phone — or to `/login`, where **Login as Scanner** goes to the same place.
+
+There is no invitation email and no password reset. **Set a new password** is
+on each worker's row, and it signs their phones out. **Disable** does the same
+and stops them signing in again; it is the button for a phone left on a bus.
+
+A Scanner account can reach `/scan` and the few requests behind it and **no**
+panel page, action or API route — `tests/roles.test.ts` walks the tree and
+proves it. It is never sent a customer name, phone or address: a scan carries a
+code, an order number and a shop, and that is all the phone is given.
+
+### Installing it on the phone
+
+Android Chrome offers **Install** by itself once `/scan` has been opened over
+HTTPS, which Vercel provides. On an iPhone it is **Share → Add to Home
+Screen**; Safari scans fine but has no torch. The manifest is scoped to `/scan`
+and linked only from the scanner layout, so nothing offers to install anything
+while somebody is reading the Parcels screen.
+
+The camera asks for permission on the first scanning screen. If it is refused,
+the numbers can still be typed in — **Type number** takes either the
+16-character EXPEDICIÓN or the 23-character Código de Bulto.
+
+### What a scan changes
+
+A badge, and nothing else. **Left the warehouse** and **Back in the warehouse**
+appear on the parcel page and on the Parcels rows, and the pre-admission tabs
+gain a **Left the warehouse (N) / Not scanned out (N)** filter that the PDF
+export follows. A scan never moves a parcel's state, closes it, or touches the
+escalation — the warehouse opening a box is not Correos reporting a return.
+
+Scans are kept **ninety days**, on their own clock, separate from the parcels'
+thirty: a return scanned on day 40 has to be able to say the parcel left on day
+2.
+
+---
+
 ## Migrations
 
 **Migrations do not run in the build.** A failed migration must not be able to
@@ -581,3 +640,8 @@ and leave everything else here. It has no dependency on any other route.
 Each later migration is step 4 again, without `seed`: run the workflow first,
 then deploy. The migration is written so the old code still works against the
 new schema, which is what makes that order safe.
+
+`0007_scanner.sql` is the Scanner's, and it is the usual shape: one defaulted
+column, two new tables and one index, so the version live at the time carries
+on untouched either side of it. Run it, then sync the fork, then make the first
+worker from [Settings → Scanner accounts](#making-the-first-worker).

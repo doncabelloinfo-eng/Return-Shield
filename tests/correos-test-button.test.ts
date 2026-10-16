@@ -5,7 +5,12 @@ import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from 'vites
 // one test below asserts the action actually calls it. "Logged-in users only"
 // is part of what the button is, not an incidental detail: anonymously
 // available, it would let anyone on the internet make us mint carrier tokens.
-const requireUser = vi.fn(async () => ({ id: 'u1', email: 'op@example.com', name: 'Op' }));
+// `role: 'operator'` is not decoration. Every panel route checks it now, and a
+// session without one is refused — which is the point of making `requireUser`
+// operator-only, and is what a warehouse phone gets. See lib/auth/roles.ts.
+const requireUser = vi.fn(async () => (
+  { id: 'u1', email: 'op@example.com', name: 'Op', role: 'operator' as const }
+));
 vi.mock('@/lib/auth/guard', () => ({ requireUser }));
 
 const { testCorreosConnection, resetCorreosBatchMode } = await import('@/app/actions/correos');

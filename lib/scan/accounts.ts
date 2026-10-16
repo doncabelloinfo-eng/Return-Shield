@@ -44,14 +44,14 @@ export const scannerAccounts = retryableRead('scanner accounts', async (): Promi
    * they have ever made — ninety days of a warehouse, to draw one date.
    */
   const result = await getDb().execute(raw`
-    SELECT u.id, u.name, u.email, u.disabled_at, last.scanned_at AS last_scan_at
+    SELECT u.id, u.name, u.email, u.disabled_at, latest.scanned_at AS last_scan_at
       FROM users u
       LEFT JOIN LATERAL (
         SELECT s.scanned_at FROM scans s
          WHERE s.user_id = u.id
          ORDER BY s.scanned_at DESC
          LIMIT 1
-      ) last ON true
+      ) latest ON true
      WHERE u.role = 'scanner'
      ORDER BY u.name
   `);

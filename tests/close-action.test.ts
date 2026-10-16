@@ -9,7 +9,12 @@ import { eq } from 'drizzle-orm';
 // be a real row — a made-up id would fail on the constraint rather than on
 // anything the test is about.
 let userId = '00000000-0000-0000-0000-000000000000';
-const requireUser = vi.fn(async () => ({ id: userId, email: 'op@example.com', name: 'Op' }));
+// `role: 'operator'` is not decoration. Every panel route checks it now, and a
+// session without one is refused — which is the point of making `requireUser`
+// operator-only, and is what a warehouse phone gets. See lib/auth/roles.ts.
+const requireUser = vi.fn(async () => (
+  { id: userId, email: 'op@example.com', name: 'Op', role: 'operator' as const }
+));
 vi.mock('@/lib/auth/guard', () => ({ requireUser }));
 // revalidatePath needs a request scope, which there is none of here.
 vi.mock('next/cache', () => ({ revalidatePath: vi.fn() }));

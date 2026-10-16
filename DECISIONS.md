@@ -1401,6 +1401,93 @@ message a missing number" path and the `call` task sit *after* the
 a provider that can send is connected. An earlier draft of this note named
 those instead; it was wrong about the mechanism, not about the cost.)
 
+## 6m. The Scanner
+
+A parcel leaves the warehouse and Correos still says "Pre-admisión" four days
+later. Nobody could tell whether it was with Correos or still on a shelf, and
+those two want opposite actions. A return arriving back recorded nothing at
+all. `/scan` is the phone app that answers both, inside the same Next app and
+the same database.
+
+**A scan has no foreign key to `shipments`, and that is the design.** A scan is
+a fact about a cardboard box: this code was read, by this person, at this time.
+It is true whether or not Return Shield has ever heard of the parcel — a TikTok
+or Amazon parcel is usually scanned out days before its file is uploaded, and a
+return often arrives after the rolling thirty-day window has deleted the order.
+So the link to a parcel is the CODE, worked out every time anybody reads a scan
+rather than frozen at scan time. A frozen "no such parcel" would still say so
+after the upload, telling the operator a parcel never left the warehouse when
+it left on Tuesday.
+
+**The link is the first fifteen characters**, because that is the one part the
+two numbers printed on a Correos label share — and `shipments.shipping_code`
+holds whichever of them its source gave us. Shopify's fulfilment carries the
+16-character EXPEDICIÓN; a marketplace file sometimes carries the 23-character
+Código de Bulto. The exact code wins where it is known, which is what tells the
+two boxes of a multi-parcel shipment apart; with only the base to go on and
+more than one candidate, the phone says "2 parcels with this number" rather
+than picking one. Picking one is how a parcel gets marked as having left the
+warehouse while it is on a shelf.
+
+**"Beep means it is saved" decides the order of everything.** The warehouse
+signal drops between the aisles and a worker holding a parcel cannot watch a
+spinner, so a read is written to IndexedDB, THEN beeped, THEN sent, and re-sent
+until the server has it. Each read carries an id the phone made and the server
+records which ids it has counted (`scans.read_ids`), so sending the same read
+ten times is the same as sending it once. Without that, the retry a weak signal
+forces would turn an ordinary scan into "scanned twice" and the counts the
+operator reads would drift up with the signal strength — with nothing looking
+broken.
+
+**A duplicate is the same code as read, not the same base.** A multi-parcel
+shipment prints one EXPEDICIÓN and a Código de Bulto per box, so two boxes
+share a base and are two parcels: collapsing them would lose a box that really
+did leave the warehouse, which is worse than the opposite mistake. Scanning a
+label and then typing the other number off the same label therefore gives two
+rows — both visible in the list, either removable with the ×.
+
+**The Returns tab deduplicates on the base instead**, because the question
+there is "which orders came back" and the row shows an order number and a shop,
+both of which belong to the shipment. It is also what makes the tab's count and
+the two sections agree: the count is `count(DISTINCT base)` over the same
+window.
+
+**`requireUser` is operator-only now.** It was the guard every panel page and
+every server action already called, so making the EXISTING one strict means a
+page written next year is refused to a warehouse phone without anybody
+remembering the rule. `requireScanner` is its opposite number. `toggleTheme`
+turned out to have no guard at all — one unguarded action in a file full of
+guarded ones, on the reasoning that it only set a cookie — and
+tests/roles.test.ts now walks every page, action and route on disk so that
+cannot happen quietly again.
+
+**Scans are kept ninety days, on their own clock.** Deliberately longer than
+the parcels' thirty and deliberately independent of it: a return scanned on day
+40 has to be able to say the parcel left on day 2, and a matched return has to
+stay under "From Return Shield" rather than jumping sections on day 31 — which
+is why the order number and shop are copied onto the scan when it is taken.
+
+**The decoder is ours, not jsDelivr's.** `zxing-wasm` fetches its 950 KB
+`zxing_reader.wasm` from a CDN by default: a third party in the request path of
+the one thing the warehouse needs to work. `prebuild` copies it into `public/`
+and `next.config.mjs` serves it immutable. The service worker is served from
+the root rather than from `/scan/`, because a worker may only control pages
+beneath the directory it is served from — and `/scan/sw.js` could claim
+`/scan/` but not `/scan` itself, which is the manifest's `start_url`.
+
+**What a scan does NOT do.** It never moves a parcel's state, closes it, or
+touches the escalation, the messages or the tasks. The warehouse opening a box
+is not Correos reporting a return, and the chasing carries on until Correos
+says so. There are no Shopify tags either: the app has only `read_orders`, and
+tagging would need `write_orders` and a change to the Shopify app the operator
+does not want touched. The badge and the Returns tab are the record.
+
+**What could not be checked here.** The real camera and Chrome's install
+prompt. Everything else — the parse, the matching, the retry, the roles, the
+two retention windows — is in the suite.
+
+---
+
 ## 7. Where I departed from the prototype
 
 The prototype is the specification, and I ported it. These are the places I did

@@ -4,7 +4,12 @@ import { eq } from 'drizzle-orm';
 
 // A server action is a public endpoint whatever the page around it looks like,
 // so the guard is stubbed with a spy and one test below asserts it is called.
-const requireUser = vi.fn(async () => ({ id: 'u', email: 'op@example.com', name: 'Op' }));
+// `role: 'operator'` is not decoration. Every panel route checks it now, and a
+// session without one is refused — which is the point of making `requireUser`
+// operator-only, and is what a warehouse phone gets. See lib/auth/roles.ts.
+const requireUser = vi.fn(async () => (
+  { id: 'u', email: 'op@example.com', name: 'Op', role: 'operator' as const }
+));
 vi.mock('@/lib/auth/guard', () => ({ requireUser }));
 // revalidatePath needs a request scope, which there is none of here.
 vi.mock('next/cache', () => ({ revalidatePath: vi.fn() }));
