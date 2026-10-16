@@ -3,6 +3,7 @@ import { getDb, rowsOf } from '@/db';
 import { now } from '@/lib/clock';
 import { madridMidnightUtc, madridParts } from '@/lib/time';
 import { retentionDays, retentionWasClamped, MIN_RETENTION_DAYS } from '@/lib/retention';
+import { SCAN_RETENTION_DAYS } from '@/lib/scan/model';
 
 /**
  * The rolling window. Every night, the day that has just become the
@@ -24,6 +25,13 @@ import { retentionDays, retentionWasClamped, MIN_RETENTION_DAYS } from '@/lib/re
  *
  * And `closures` is never touched. It is the one record meant to outlive its
  * parcel; see db/schema.ts.
+ *
+ * THE WAREHOUSE'S SCANS RUN ON THEIR OWN CLOCK, ninety days rather than thirty,
+ * and nothing about the parcels' window touches them. They have no foreign key
+ * to `shipments` precisely so that this is true: a return scanned on day 40 has
+ * to be able to say the parcel left on day 2, and the Returns tab has to keep
+ * showing a matched return after the parcel itself has gone. See
+ * lib/scan/model.ts.
  */
 
 /** Rows per statement. Small enough to stay inside a statement timeout. */
@@ -41,6 +49,11 @@ export interface CleanupReport {
   importBatches: number;
   jobRuns: number;
   postcodes: number;
+  /** Warehouse scans past their own ninety-day window. */
+  scans: number;
+  /** Batches whose every scan has gone. */
+  scanBatches: number;
+  scanWindowDays: number;
   /** Past the window, still going, kept on purpose. */
   keptUnfinished: number;
   /** Set when RETENTION_DAYS asked for less than the floor allows. */
@@ -197,6 +210,31 @@ export async function runCleanup(at: Date = now()): Promise<CleanupReport> {
     ) RETURNING postal_code AS id
   `);
 
+  /*
+   * The warehouse's scans, on their own ninety-day window.
+   *
+   * Scans first, batches second, and batches only when they are empty — the
+   * foreign key from `scans` cascades, so deleting a batch would take scans
+   * that are still inside their window with it. The NOT EXISTS is what stops
+   * a batch started ninety-one days ago and added to since from doing that.
+   */
+  const scanKeepFrom = cutoffFor(at, SCAN_RETENTION_DAYS).toISOString();
+
+  const scans = await deleteBatched('scans', (limit) => raw`
+    DELETE FROM scans WHERE id IN (
+      SELECT id FROM scans WHERE scanned_at < ${scanKeepFrom}::timestamptz LIMIT ${limit}
+    ) RETURNING id
+  `);
+
+  const scanBatches = await deleteBatched('scan_batches', (limit) => raw`
+    DELETE FROM scan_batches WHERE id IN (
+      SELECT b.id FROM scan_batches b
+       WHERE b.started_at < ${scanKeepFrom}::timestamptz
+         AND NOT EXISTS (SELECT 1 FROM scans s WHERE s.batch_id = b.id)
+       LIMIT ${limit}
+    ) RETURNING id
+  `);
+
   const keptUnfinished = await countKeptUnfinished(keepFrom);
 
   return {
@@ -210,6 +248,9 @@ export async function runCleanup(at: Date = now()): Promise<CleanupReport> {
     importBatches,
     jobRuns,
     postcodes,
+    scans,
+    scanBatches,
+    scanWindowDays: SCAN_RETENTION_DAYS,
     keptUnfinished,
     ...(retentionWasClamped()
       ? { note: `RETENTION_DAYS asked for less than ${MIN_RETENTION_DAYS}; using ${windowDays}` }

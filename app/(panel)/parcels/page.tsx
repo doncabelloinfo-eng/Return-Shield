@@ -1,9 +1,11 @@
 import { parcelsView, PAGE_SIZE } from '@/lib/views/parcels';
 import { closuresView } from '@/lib/views/closures';
+import { returnsView } from '@/lib/views/returns';
 import { ParcelTabs } from '@/components/ParcelTabs';
 import { ParcelSearch } from '@/components/ParcelSearch';
 import { ParcelsTable } from '@/components/ParcelsTable';
 import { ClosuresPanel } from '@/components/ClosuresPanel';
+import { ReturnsPanel } from '@/components/ReturnsPanel';
 import { ContactTable } from '@/components/ContactTable';
 import { Pager } from '@/components/Pager';
 import { ExportPdfButton } from '@/components/ExportPdfButton';
@@ -28,16 +30,20 @@ export default async function ParcelsPage({
 }: {
   searchParams: {
     status?: string; q?: string; store?: string; date?: string; page?: number | string;
-    reason?: string; month?: string;
+    reason?: string; month?: string; scanned?: string; rq?: string;
   };
 }) {
   const page = Number(searchParams.page ?? 1) || 1;
   const q = searchParams.q ?? '';
   const store = searchParams.store ?? '';
   const date = searchParams.date ?? '';
+  const scanned = searchParams.scanned ?? '';
 
-  const view = await parcelsView({ status: searchParams.status, q, store, date, page });
+  const view = await parcelsView({ status: searchParams.status, q, store, date, scanned, page });
   const onClosed = view.tab.id === 'closed';
+  // Returns read from `scans`, which outlives the parcels, so the tab has its
+  // own view the same way the closed tab does.
+  const onReturns = view.tab.id === 'returns';
   // The missed-delivery tab is a worklist, not an inventory: it shows the
   // contact columns instead of the status ones, because every row of it is
   // somebody to ring today.
@@ -55,15 +61,17 @@ export default async function ParcelsPage({
     })
     : null;
 
+  const returns = onReturns ? await returnsView({ q: searchParams.rq }) : null;
+
   const heading = headingFor(view.tab.id, view.total, view.tabs);
 
   return (
     <div className="px-4 pb-10 pt-[18px]">
       <div className="flex flex-wrap items-end gap-[14px]">
         <PageHeading title="Parcels" note={heading} />
-        {!onClosed && (
+        {!onClosed && !onReturns && (
           <>
-            <ParcelSearch stores={view.stores} current={{ q, store, date }} />
+            <ParcelSearch stores={view.stores} current={{ q, store, date }} scan={view.scan} />
             {/*
               Beside the filters, because what it exports is whatever they have
               narrowed this tab to — every row of it, not the hundred on screen.
@@ -73,7 +81,7 @@ export default async function ParcelsPage({
             */}
             <ExportPdfButton
               total={view.total}
-              params={{ status: view.tab.id, q, store, date }}
+              params={{ status: view.tab.id, q, store, date, scanned }}
             />
           </>
         )}
@@ -84,7 +92,9 @@ export default async function ParcelsPage({
       </div>
 
       <div className="mt-[14px]">
-        {onClosed && closures ? (
+        {onReturns && returns ? (
+          <ReturnsPanel view={returns} />
+        ) : onClosed && closures ? (
           <ClosuresPanel
             view={closures}
             current={{
@@ -145,6 +155,13 @@ function headingFor(
     return `${total} past the cleanup window and still going — these are kept until they finish`;
   }
   if (tab === 'closed') return 'Written off by hand. The record outlives the parcel.';
+  if (tab === 'returns') {
+    // From the tab's own count, not from `total`: this tab's list comes from
+    // `scans`, so the shipments query behind `total` has nothing in it.
+    const back = tabs.find((t) => t.id === 'returns')?.count ?? 0;
+    return `${back} ${back === 1 ? 'parcel' : 'parcels'} the warehouse scanned coming back`
+      + ' · the badge is the record — nothing here closes a parcel or changes its state';
+  }
 
   const notes = [`${open} not finished yet`];
   if (stuckPre) notes.push(`${stuckPre} stuck in pre-admission`);

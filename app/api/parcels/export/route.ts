@@ -2,7 +2,9 @@ import { NextResponse } from 'next/server';
 import { currentUser } from '@/lib/auth/session';
 import { loadDemoClock } from '@/lib/demo-clock';
 import { now } from '@/lib/clock';
-import { EXPORT_CAP, isParcelTab, parcelsExport, parseDayFilter } from '@/lib/views/parcels';
+import {
+  EXPORT_CAP, hasScanFilter, isParcelTab, isScanFilter, parcelsExport, parseDayFilter,
+} from '@/lib/views/parcels';
 import { filterLine, parcelsPdf, pdfFilename } from '@/lib/export/parcels-pdf';
 
 // Per-request, behind a login or a signed token, and it reads the database.
@@ -82,6 +84,10 @@ export async function GET(req: Request): Promise<NextResponse> {
   const q = params.get('q') ?? '';
   const store = params.get('store') ?? '';
   const date = params.get('date') ?? '';
+  // The warehouse filter travels with the rest. The view ignores it on the
+  // tabs that do not offer it, so a hand-typed one cannot narrow a file under
+  // a heading that does not say so.
+  const scanned = params.get('scanned') ?? '';
 
   await loadDemoClock();
   const at = now();
@@ -91,6 +97,7 @@ export async function GET(req: Request): Promise<NextResponse> {
     q,
     store,
     date,
+    scanned,
     at,
   });
 
@@ -109,7 +116,15 @@ export async function GET(req: Request): Promise<NextResponse> {
      * the dangerous half: a file of every day's parcels under a one-day
      * heading, sent to a warehouse.
      */
-    filters: filterLine({ q, store, date: parseDayFilter(date)?.key }),
+    filters: filterLine({
+      q,
+      store,
+      date: parseDayFilter(date)?.key,
+      // From the view, not from the query string: the view drops the filter on
+      // a tab that does not offer it, and the heading must say what the rows
+      // actually went through rather than what was asked for.
+      scanned: hasScanFilter(view.tab.id) && isScanFilter(scanned) ? scanned : undefined,
+    }),
     at,
   });
 

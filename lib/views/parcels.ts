@@ -16,6 +16,9 @@ import {
 import { money } from '@/lib/escalation/decide';
 import { displayPhone } from '@/lib/import/phone';
 import { retentionDays } from '@/lib/retention';
+import { latestScanLateral } from '@/lib/scan/match';
+import { scanMark, type ScanMark } from './scans';
+import { returnsCount } from './returns';
 import { closureCount } from './closures';
 
 /**
@@ -47,7 +50,7 @@ export type ParcelTabId =
   | 'accepted' | 'in_transit' | 'out_for_delivery'
   | 'failed' | 'bad_address' | 'at_office' | 'missed_delivery' | 'refused'
   | 'returning' | 'returned' | 'delivered' | 'collected' | 'stale'
-  | 'stuck_30' | 'to_review' | 'closed';
+  | 'stuck_30' | 'to_review' | 'closed' | 'returns';
 
 export interface ParcelTab extends Bilingual {
   id: ParcelTabId;
@@ -88,6 +91,11 @@ export const PARCEL_TABS: readonly ParcelTab[] = [
   { id: 'stuck_30', en: 'Stuck 30+ days, not finished', es: '', urgent: true },
   { id: 'to_review', en: 'To review (Correos said something new)', es: "Correos' words" },
   { id: 'closed', en: 'Closed by hand', es: '' },
+  // Not a status at all: what the warehouse scanned coming back. It sits at the
+  // end of the row because it reads from a different table and answers a
+  // different question — "what has physically arrived" rather than "where is
+  // everything". See lib/views/returns.ts.
+  { id: 'returns', en: 'Returns', es: '' },
 ];
 
 export function isParcelTab(x: string): x is ParcelTabId {
@@ -95,6 +103,55 @@ export function isParcelTab(x: string): x is ParcelTabId {
 }
 
 export const PAGE_SIZE = 100;
+
+/* --------------------------------------------------- did it leave the warehouse */
+
+/**
+ * The warehouse filter, on the two tabs where it answers something.
+ *
+ * THIS IS THE POINT OF THE WHOLE SCANNER. A parcel sitting in "Pre-admisión"
+ * four days after the label was printed is one of two completely different
+ * problems: it is on a shelf in the warehouse and nobody has posted it, or it
+ * is with Correos and Correos has not scanned it. Until the warehouse scanned
+ * parcels out, nothing in this system could tell those apart — and they need
+ * opposite actions.
+ *
+ * It is a filter beside the existing ones rather than a tab of its own, so the
+ * PDF export follows it exactly as it follows the search, the shop and the
+ * date. See lib/export/parcels-pdf.ts.
+ */
+export type ScanFilter = 'out' | 'not';
+
+export function isScanFilter(value: string | undefined | null): value is ScanFilter {
+  return value === 'out' || value === 'not';
+}
+
+/**
+ * Pre-admission, and stuck in pre-admission.
+ *
+ * Not every tab. Once Correos has admitted a parcel the question is answered —
+ * it is plainly not on our shelf — and a filter offering to split "Delivered"
+ * by whether somebody scanned it out is a filter that makes a screen harder to
+ * read for nothing.
+ */
+export const SCAN_FILTER_TABS: readonly ParcelTabId[] = ['created', 'stuck_pre_admission'];
+
+export function hasScanFilter(tab: ParcelTabId): boolean {
+  return SCAN_FILTER_TABS.includes(tab);
+}
+
+/** The counts beside the two choices. Always both, even at zero. */
+export interface ScanFilterState {
+  current: ScanFilter | null;
+  out: number;
+  not: number;
+}
+
+function scanPredicate(filter: ScanFilter | null): SQL {
+  if (filter === 'out') return raw`b.scanned_out_at IS NOT NULL`;
+  if (filter === 'not') return raw`b.scanned_out_at IS NULL`;
+  return raw`TRUE`;
+}
 
 /* -------------------------------------------------------------- predicates */
 
@@ -187,6 +244,18 @@ function predicates(cutoff: Date, sameStatusCutoff: Date, staleBefore: Date): Re
     stuck_30: raw`NOT ${FINISHED} AND b.ship_ref < ${staleAt}`,
     to_review: raw`b.needs_review`,
     closed: raw`b.dropped_at IS NOT NULL`,
+    /*
+     * Returns are scans, not shipments, so there is no predicate over parcels
+     * that could select them — a return whose parcel the cleanup removed has
+     * no row here at all, and those are precisely the ones the tab must show.
+     *
+     * FALSE rather than an exception in the type, so every count in the
+     * statement below still has a column and the list for this tab is empty by
+     * construction. The page renders `returnsView` instead, and the tab's own
+     * count comes from `returnsCount`, exactly as `closed` takes its count from
+     * the closures table.
+     */
+    returns: raw`FALSE`,
   };
 }
 
@@ -248,6 +317,17 @@ export interface ParcelListRow {
    * "Pre-admission" or under "All not finished".
    */
   badges: string[];
+  /**
+   * The warehouse's own two facts, beside what Correos says.
+   *
+   * `left` is the whole point of the Scanner: a parcel still in "Pre-admisión"
+   * that left the warehouse on Tuesday is with Correos, not on a shelf.
+   * `back` records a return physically arriving and changes nothing else —
+   * the parcel's state, its escalation and its tasks carry on until Correos
+   * reports the return, because the warehouse opening a box is not Correos.
+   */
+  left: ScanMark | null;
+  back: ScanMark | null;
   closed: { reason: string; note: string; at: string } | null;
 }
 
@@ -263,6 +343,8 @@ export interface ParcelsView {
   page: number;
   pages: number;
   stores: string[];
+  /** Null on the tabs where "did it leave the warehouse?" answers nothing. */
+  scan: ScanFilterState | null;
 }
 
 export interface ParcelsQuery {
@@ -271,6 +353,8 @@ export interface ParcelsQuery {
   store?: string;
   /** A Madrid day, "2026-10-06". Filters on the ship date. */
   date?: string;
+  /** "out" or "not": whether the warehouse scanned it out. */
+  scanned?: string;
   page?: number;
   at?: Date;
 }
@@ -305,7 +389,9 @@ function base(): SQL {
              attempts.n AS failed_attempts,
              (attempts.n > 0 OR tried.n > 0) AS missed_delivery,
              ev.event_desc, ev.mapped_state, ev.occurred_at,
-             (rev.id IS NOT NULL) AS needs_review
+             (rev.id IS NOT NULL) AS needs_review,
+             out_scan.scanned_at AS scanned_out_at, out_scan.worker AS scanned_out_by,
+             back_scan.scanned_at AS scanned_back_at, back_scan.worker AS scanned_back_by
         FROM shipments s
         JOIN orders o ON o.id = s.order_id
         JOIN stores st ON st.id = o.store_id
@@ -344,6 +430,24 @@ function base(): SQL {
           ON rev.event_code = ev.event_code
          AND rev.event_desc = ev.event_desc
          AND rev.resolved_at IS NULL
+        /*
+         * The warehouse's own two facts: when this parcel was last scanned out,
+         * and when it was last scanned back in.
+         *
+         * Matched on the code rather than on a shipment id, because a scan is a
+         * fact about a box and may well have happened before the parcel existed
+         * in here - see lib/scan/match.ts. Two index seeks per row on
+         * scans_base_idx, which find nothing for the great majority of
+         * parcels; they are in the base CTE because the "Left the warehouse"
+         * filter counts them as well as the list showing them, and two
+         * definitions of "has it left" is one too many.
+         *
+         * (No backticks in here. This is a SQL comment inside a JavaScript
+         * template literal, and a backtick ends the literal - which has now
+         * broken this file's build four separate times.)
+         */
+        ${latestScanLateral('outgoing', 'out_scan')}
+        ${latestScanLateral('incoming', 'back_scan')}
     )
   `;
 }
@@ -416,26 +520,45 @@ async function parcelsViewQuery(opts: ParcelsQuery = {}): Promise<ParcelsView> {
   const day = parseDayFilter(opts.date);
   const extra = filters(q, store, day);
 
-  // Counts for every tab in one pass, with the search and shop filter applied
-  // — a count that ignored the filter would promise rows the list then does
-  // not show.
+  // Only on the tabs that offer it. A `?scanned=out` typed onto the Delivered
+  // tab is ignored rather than quietly hiding rows behind a control that is
+  // not on screen.
+  const scanFilter = hasScanFilter(tabId) && isScanFilter(opts.scanned) ? opts.scanned : null;
+  const scanWhere = scanPredicate(scanFilter);
+
+  /*
+   * Counts for every tab in one pass, with the search, shop, date AND warehouse
+   * filters applied — a count that ignored a filter would promise rows the list
+   * then does not show.
+   *
+   * The two warehouse counts are the exception, and have to be: they are the
+   * labels ON the warehouse filter, so they are counted for the current tab
+   * WITHOUT it. Counting them through their own filter would make one of them
+   * the total and the other zero, for ever.
+   */
   const countRow = raw.join(
-    PARCEL_TABS.map((t) => raw`count(*) FILTER (WHERE ${where[t.id]}) AS ${raw.identifier(t.id)}`),
+    [
+      ...PARCEL_TABS.map((t) => raw`
+        count(*) FILTER (WHERE ${where[t.id]} AND ${scanWhere}) AS ${raw.identifier(t.id)}`),
+      raw`count(*) FILTER (WHERE ${where[tabId]} AND b.scanned_out_at IS NOT NULL) AS scanned_out`,
+      raw`count(*) FILTER (WHERE ${where[tabId]} AND b.scanned_out_at IS NULL) AS not_scanned_out`,
+    ],
     raw`, `,
   );
 
-  const [countResult, pageResult, storeResult, closedCount] = await Promise.all([
+  const [countResult, pageResult, storeResult, closedCount, returnCount] = await Promise.all([
     getDb().execute(raw`${base()} SELECT ${countRow} FROM b WHERE ${extra}`),
     getDb().execute(raw`
       ${base()}
       SELECT b.*, count(*) OVER () AS total_rows
         FROM b
-       WHERE ${where[tabId]} AND ${extra}
+       WHERE ${where[tabId]} AND ${extra} AND ${scanWhere}
        ORDER BY ${orderFor(tabId)}
        LIMIT ${PAGE_SIZE} OFFSET ${(page - 1) * PAGE_SIZE}
     `),
     getDb().execute(raw`SELECT name FROM stores ORDER BY name`),
     closureCount(),
+    returnsCount(at),
   ]);
 
   const counts = rowsOf<Record<string, string | number>>(countResult)[0] ?? {};
@@ -443,14 +566,24 @@ async function parcelsViewQuery(opts: ParcelsQuery = {}): Promise<ParcelsView> {
   const total = raws.length ? Number(raws[0].total_rows) : 0;
 
   return {
-    // Every count but one comes from the single statement above, so a tab and
-    // its list cannot disagree. `closed` is the exception on purpose: its list
-    // is the `closures` table, which outlives the parcels, so counting
-    // shipments would undercount by every write-off the window has since
-    // cleaned up. Counted from the same table its list reads.
+    /*
+     * Every count but two comes from the single statement above, so a tab and
+     * its list cannot disagree.
+     *
+     * The two exceptions read from the tables their own lists read, for the
+     * same reason: both outlive the parcels. `closures` keeps every write-off
+     * after the thirty-day window has taken the parcel, and `scans` keeps
+     * ninety days of returns whether or not the parcel still exists — so
+     * counting shipments would undercount both by exactly the rows that matter
+     * most.
+     */
     tabs: PARCEL_TABS.map((t) => ({
       ...t,
-      count: t.id === 'closed' ? closedCount : Number(counts[t.id] ?? 0),
+      count: t.id === 'closed'
+        ? closedCount
+        : t.id === 'returns'
+          ? returnCount
+          : Number(counts[t.id] ?? 0),
     })),
     tab: PARCEL_TABS.find((t) => t.id === tabId) ?? PARCEL_TABS[0],
     rows: raws.map((r) => toRow(r, at, cutoff, sameStatusCutoff, staleBefore)),
@@ -458,6 +591,13 @@ async function parcelsViewQuery(opts: ParcelsQuery = {}): Promise<ParcelsView> {
     page,
     pages: Math.max(1, Math.ceil(total / PAGE_SIZE)),
     stores: rowsOf<{ name: string }>(storeResult).map((s) => s.name),
+    scan: hasScanFilter(tabId)
+      ? {
+        current: scanFilter,
+        out: Number(counts.scanned_out ?? 0),
+        not: Number(counts.not_scanned_out ?? 0),
+      }
+      : null,
   };
 }
 
@@ -507,6 +647,12 @@ async function parcelsExportQuery(opts: ParcelsQuery = {}): Promise<ParcelsExpor
   const staleBefore = cutoffFor(at);
   const where = predicates(cutoff, sameStatusCutoff, staleBefore);
   const extra = filters(q, store, parseDayFilter(opts.date));
+  // The warehouse filter, exactly as the screen applied it. This is why it is a
+  // filter and not a tab: the file the warehouse is sent is the list that was
+  // on screen, whichever way it had been narrowed.
+  const scanWhere = scanPredicate(
+    hasScanFilter(tabId) && isScanFilter(opts.scanned) ? opts.scanned : null,
+  );
 
   // `count(*) OVER ()` is not affected by the LIMIT, so the file can say "5000
   // of 7214" rather than quietly stopping at five thousand.
@@ -514,7 +660,7 @@ async function parcelsExportQuery(opts: ParcelsQuery = {}): Promise<ParcelsExpor
     ${base()}
     SELECT b.*, count(*) OVER () AS total_rows
       FROM b
-     WHERE ${where[tabId]} AND ${extra}
+     WHERE ${where[tabId]} AND ${extra} AND ${scanWhere}
      ORDER BY ${orderFor(tabId)}
      LIMIT ${EXPORT_CAP}
   `);
@@ -587,6 +733,10 @@ interface RawParcelRow {
   mapped_state: string | null;
   occurred_at: string | null;
   needs_review: boolean;
+  scanned_out_at: string | null;
+  scanned_out_by: string | null;
+  scanned_back_at: string | null;
+  scanned_back_by: string | null;
   total_rows: number | string;
 }
 
@@ -701,6 +851,8 @@ function toRow(
       : '',
     shopifyHref: shopifyOrderLink(r.store_platform, r.shop_domain, r.external_order_id) ?? '',
     badges,
+    left: scanMark(r.scanned_out_at, r.scanned_out_by, 'outgoing'),
+    back: scanMark(r.scanned_back_at, r.scanned_back_by, 'incoming'),
     closed: r.dropped_at
       ? {
         reason: closeReasonLabel(r.close_reason),

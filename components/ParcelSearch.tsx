@@ -2,6 +2,7 @@
 
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useCallback } from 'react';
+import type { ScanFilterState } from '@/lib/views/parcels';
 
 /**
  * Search and the shop filter, both inside whatever tab is selected.
@@ -11,10 +12,12 @@ import { useCallback } from 'react';
  * throwing you back to everything.
  */
 export function ParcelSearch({
-  stores, current,
+  stores, current, scan,
 }: {
   stores: string[];
   current: { q: string; store: string; date: string };
+  /** Null on the tabs where "did it leave the warehouse?" answers nothing. */
+  scan: ScanFilterState | null;
 }) {
   const router = useRouter();
   const params = useSearchParams();
@@ -77,6 +80,43 @@ export function ParcelSearch({
           <button type="button" onClick={() => set('date', '')} className={chip(false)}>
             Any day
           </button>
+        )}
+
+        {/*
+          The warehouse filter, on the pre-admission tabs only.
+
+          This is what the Scanner is for. A parcel that Correos still calls
+          "Pre-admisión" is either with Correos and unscanned by them, or on a
+          shelf here — opposite problems with opposite answers, and until the
+          warehouse scanned parcels out nothing could tell them apart.
+
+          Here, beside the other filters, rather than as a tab of its own: the
+          PDF export reads these same search parameters, so the file the
+          warehouse is sent is the list that was on screen.
+
+          Both counts show even at zero, the same way every tab does. "Not
+          scanned out (0)" is worth seeing — it is the morning everything went.
+        */}
+        {scan && (
+          <>
+            <span className="mx-1 h-[22px] w-px bg-line" />
+            <button
+              type="button"
+              onClick={() => set('scanned', scan.current === 'out' ? '' : 'out')}
+              aria-pressed={scan.current === 'out'}
+              className={chip(scan.current === 'out')}
+            >
+              Left the warehouse ({scan.out})
+            </button>
+            <button
+              type="button"
+              onClick={() => set('scanned', scan.current === 'not' ? '' : 'not')}
+              aria-pressed={scan.current === 'not'}
+              className={chip(scan.current === 'not')}
+            >
+              Not scanned out ({scan.not})
+            </button>
+          </>
         )}
       </div>
     </div>

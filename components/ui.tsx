@@ -169,3 +169,37 @@ export function AlertBadge({ children }: { children: React.ReactNode }) {
     </span>
   );
 }
+
+/**
+ * "Left the warehouse · 16 Oct · 12:20 · María" — what the Scanner knows.
+ *
+ * Deliberately not an `AlertBadge`. Nothing here is a problem: a parcel that
+ * left the warehouse is a parcel doing what it should, and a return arriving
+ * back is the end of a story rather than a new one. Red is kept for the badges
+ * that mean somebody has to do something.
+ *
+ * Outgoing is green because it is progress. Incoming is navy because it is a
+ * fact about the building, not about the parcel's state — which the Scanner
+ * deliberately does not change.
+ */
+export function ScanBadge({
+  mark,
+  direction,
+}: {
+  mark: { label: string; when: string; exactWhen: string; worker: string };
+  direction: 'outgoing' | 'incoming';
+}) {
+  const out = direction === 'outgoing';
+  return (
+    <span
+      title={`${mark.label} · ${mark.exactWhen}${mark.worker ? ` · ${mark.worker}` : ''}`}
+      className="inline-block whitespace-nowrap rounded-[3px] border px-[6px] py-[2px] text-[10.5px] font-semibold"
+      style={out
+        ? { borderColor: 'var(--good)', background: 'var(--goodsoft)', color: 'var(--good)' }
+        : { borderColor: 'var(--navy)', background: 'var(--surface2)', color: 'var(--navy)' }}
+    >
+      {mark.label} · {mark.when}
+      {mark.worker ? ` · ${mark.worker}` : ''}
+    </span>
+  );
+}

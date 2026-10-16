@@ -320,13 +320,22 @@ export function pdfFilename(tabLabel: string, at: Date): string {
   return `${slug || 'parcels'}-${madridDateKey(at)}.pdf`;
 }
 
-/** The filters in use, for the line under the heading. */
+/**
+ * The filters in use, for the line under the heading.
+ *
+ * It has to name EVERY filter the rows went through. A file headed "Stuck in
+ * pre-admission" that is silently only the parcels nobody scanned out is a file
+ * somebody acts on believing it is the whole tab — which is the same mistake
+ * the `?date=banana` heading made, from the other direction.
+ */
 export function filterLine(opts: {
-  q?: string; store?: string; date?: string;
+  q?: string; store?: string; date?: string; scanned?: string;
 }): string {
   const bits: string[] = [];
   if (opts.q) bits.push(`Search "${opts.q}"`);
   if (opts.store) bits.push(`Shop: ${opts.store}`);
+  if (opts.scanned === 'out') bits.push('Left the warehouse');
+  if (opts.scanned === 'not') bits.push('Not scanned out');
   if (opts.date) {
     /*
      * The caller passes the date the SQL predicate was built from

@@ -15,6 +15,10 @@ import { StoragePanel } from '@/components/StoragePanel';
 import { databaseBytes } from '@/lib/cleanup';
 import { retentionDays } from '@/lib/retention';
 import { eventLabels } from '@/lib/carriers/correos/state-map';
+import { scannerAccounts } from '@/lib/scan/accounts';
+import { ScannerAccounts } from '@/components/ScannerAccounts';
+import { now } from '@/lib/clock';
+import { exact, human } from '@/lib/time';
 
 // Per-request, behind a login or a signed token, and it reads the database.
 // Saying so explicitly keeps it out of the build's static render pass, which
@@ -33,8 +37,11 @@ export const runtime = 'nodejs';
  * chased correctly.
  */
 export default async function SettingsPage() {
+  const at = now();
+
   const [
     watched, review, integrations, jobs, batchMode, bytes, shopifyStores, capacity, silence,
+    workers,
   ] = await Promise.all([
     getDb().select().from(postcodeStats).where(eq(postcodeStats.watch, true)).orderBy(desc(postcodeStats.failRate)),
     getDb().select().from(eventReviewQueue)
@@ -49,6 +56,7 @@ export default async function SettingsPage() {
       .orderBy(stores.name),
     sweepCapacity(),
     sweepSilence(),
+    scannerAccounts(),
   ]);
 
   const windowDays = retentionDays();
@@ -70,6 +78,27 @@ export default async function SettingsPage() {
 
       <div className="mt-[22px]">
         <JobRunsPanel jobs={jobs} />
+      </div>
+
+      {/*
+        The warehouse's own accounts. Here rather than on a screen of their own
+        because there are three of them and this is where everything else that
+        is configured already lives.
+      */}
+      <div className="mt-[22px]">
+        <ScannerAccounts
+          workers={workers.map((w) => ({
+            id: w.id,
+            name: w.name,
+            email: w.email,
+            active: w.active,
+            // Formatted here: the component is a client one, and shipping the
+            // clock and the Madrid formatting to a browser to draw "2 days
+            // ago" would be the second copy of both.
+            lastScan: w.lastScanAt ? human(w.lastScanAt, at) : 'never',
+            lastScanExact: w.lastScanAt ? exact(w.lastScanAt) : 'has never scanned anything',
+          }))}
+        />
       </div>
 
       <div className="mt-[22px] rounded-[5px] border border-line bg-surface px-4 py-[14px]">

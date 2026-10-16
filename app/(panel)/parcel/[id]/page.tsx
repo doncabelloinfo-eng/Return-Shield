@@ -4,11 +4,12 @@ import { getDb } from '@/db';
 import { contactLog, shipmentEvents } from '@/db/schema';
 import { loadRows } from '@/lib/views/rows';
 import { ladderInput } from '@/lib/shipments/repo';
+import { parcelScans } from '@/lib/views/scans';
 import { upcomingPlan, RUNG_TEXT } from '@/lib/escalation/ladder';
 import { STATE_LABEL } from '@/lib/carriers/correos/state-map';
 import { now } from '@/lib/clock';
 import { exact, human } from '@/lib/time';
-import { HeroNumber, PayBadge, StateChip, Card, toneColour } from '@/components/ui';
+import { HeroNumber, PayBadge, ScanBadge, StateChip, Card, toneColour } from '@/components/ui';
 import { ActionButton } from '@/components/RowActions';
 import { CopyButton } from '@/components/CopyButton';
 import { FileCall } from '@/components/FileCall';
@@ -33,7 +34,7 @@ export default async function ParcelPage({ params }: { params: { id: string } })
   const row = all.find((r) => r.id === params.id);
   if (!row) notFound();
 
-  const [events, log, input] = await Promise.all([
+  const [events, log, input, scans] = await Promise.all([
     getDb().select().from(shipmentEvents)
       .where(eq(shipmentEvents.shipmentId, row.id))
       .orderBy(desc(shipmentEvents.occurredAt)),
@@ -41,6 +42,9 @@ export default async function ParcelPage({ params }: { params: { id: string } })
       .where(eq(contactLog.shipmentId, row.id))
       .orderBy(desc(contactLog.at)),
     ladderInput(row.id),
+    // Two index seeks: when the warehouse last scanned this parcel out, and
+    // when it last scanned it back in. See lib/views/scans.ts.
+    parcelScans(row.id),
   ]);
 
   const plan = upcomingPlan(input, at, 4).map((r) => ({
@@ -79,6 +83,22 @@ export default async function ParcelPage({ params }: { params: { id: string } })
             </span>
           </div>
           <div className="mt-[6px]"><StateChip label={STATE_LABEL[row.state] ?? row.state} tone={tone} /></div>
+          {/*
+            Right beside what Correos says, because the pair is the answer.
+            "Pre-admisión" on its own cannot tell the operator whether a parcel
+            is with Correos or still on a shelf here; "Pre-admisión" next to
+            "Left the warehouse · 13 Oct · 12:20 · María" can.
+
+            A badge and nothing more. A scan does not move the parcel's state,
+            close it, or touch the escalation — the warehouse opening a box is
+            not Correos reporting a return.
+          */}
+          {(scans.left || scans.back) && (
+            <div className="mt-[7px] flex flex-wrap gap-[5px]">
+              {scans.left && <ScanBadge mark={scans.left} direction="outgoing" />}
+              {scans.back && <ScanBadge mark={scans.back} direction="incoming" />}
+            </div>
+          )}
         </div>
 
         <div className="w-px self-stretch bg-line" />

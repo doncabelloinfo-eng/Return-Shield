@@ -1,6 +1,6 @@
 import Link from 'next/link';
 import type { ParcelListRow } from '@/lib/views/parcels';
-import { AlertBadge, Bilingual, Empty, PayBadge, Th } from './ui';
+import { AlertBadge, Bilingual, Empty, PayBadge, ScanBadge, Th } from './ui';
 
 /**
  * Every parcel in the selected status, with enough on the row to deal with an
@@ -39,9 +39,18 @@ export function ParcelsTable({ rows, empty }: { rows: ParcelListRow[]; empty: Re
                   {r.orderNumber}
                 </Link>
                 <div className="text-[12.5px] text-muted">{r.customerName}</div>
-                {r.badges.length > 0 && (
+                {(r.badges.length > 0 || r.left || r.back) && (
                   <div className="mt-[5px] flex flex-wrap gap-[4px]">
                     {r.badges.map((b) => <AlertBadge key={b}>{b}</AlertBadge>)}
+                    {/*
+                      Beside the alert badges, not instead of them: "4 working
+                      days in pre-admission" and "Left the warehouse on Tuesday"
+                      are the two halves of the same sentence, and it is the
+                      pair that tells the operator to ring Correos rather than
+                      the warehouse.
+                    */}
+                    {r.left && <ScanBadge mark={r.left} direction="outgoing" />}
+                    {r.back && <ScanBadge mark={r.back} direction="incoming" />}
                   </div>
                 )}
                 {r.closed && (

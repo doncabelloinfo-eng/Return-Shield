@@ -1,4 +1,4 @@
-import { and, asc, eq, sql as raw } from 'drizzle-orm';
+import { and, eq, sql as raw } from 'drizzle-orm';
 import { getDb, retryableRead, rowsOf } from '@/db';
 import { users } from '@/db/schema';
 import { now } from '@/lib/clock';
@@ -155,10 +155,3 @@ export async function setScannerPassword(id: string, password: string): Promise<
   await endSessionsFor(id);
   return { ok: true };
 }
-
-/** For the empty state: has anybody set up a worker yet? */
-export const anyScanners = retryableRead('any scanners', async (): Promise<boolean> => {
-  const [row] = await getDb().select({ id: users.id }).from(users)
-    .where(eq(users.role, 'scanner')).orderBy(asc(users.createdAt)).limit(1);
-  return Boolean(row);
-});
